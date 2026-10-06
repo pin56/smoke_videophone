@@ -1,7 +1,8 @@
 """Правило положительного эпизода и объединение циклов в события.
 
 Цикл «квалифицирован», если в пределах окна 20 с у того же человека есть ещё полный цикл
-(всего >= min_cycles в окне) или у самого цикла есть прямой признак (предмет/дым).
+(всего >= min_cycles в окне) или у самого цикла есть прямой признак (предмет/дым от верификатора
+или, если flash_as_direct, вспышка зажигалки рядом по времени).
 Квалифицированные циклы одного человека объединяются в событие при паузе <= 15 с.
 События разных людей не объединяются. Событие без прямого признака отклоняется, если «чужие»
 предметы (питьё, еда) видны в большинстве его циклов: по отдельности слабые детекции
@@ -35,6 +36,10 @@ class Event:
     def direct(self) -> bool:
         return any(c.direct for c in self.cycles)
 
+    @property
+    def flash(self) -> bool:
+        return any(c.flash for c in self.cycles)
+
     def to_dict(self) -> dict:
         return {
             "track_id": self.track_id,
@@ -46,13 +51,19 @@ class Event:
             "passed": self.passed,
             "n_cycles": len(self.cycles),
             "direct": self.direct,
+            "flash": self.flash,
             "reject_reason": self.reject_reason,
         }
 
 
+def has_evidence(c: Cycle, cfg: EpisodeConfig) -> bool:
+    """Прямой признак у цикла: предмет от верификатора или вспышка зажигалки."""
+    return c.direct or (cfg.flash_as_direct and c.flash)
+
+
 def qualifying_cycles(cycles: List[Cycle], cfg: EpisodeConfig) -> List[Cycle]:
     good = sorted((c for c in cycles if c.valid), key=lambda c: c.start)
-    qual = [c.direct for c in good]
+    qual = [has_evidence(c, cfg) for c in good]
     for a in good:
         members = [j for j, b in enumerate(good) if b.start >= a.start and b.end <= a.start + cfg.window]
         if len(members) >= cfg.min_cycles:
@@ -72,8 +83,10 @@ def event_confidence(cycles: List[Cycle], cfg: EpisodeConfig) -> float:
         miss *= 1.0 - cfg.cycle_weight * c.quality
     conf = 1.0 - miss
     evidence = max((c.pos_conf for c in cycles if c.direct), default=0.0)
-    if evidence > 0:
-        ev = min(evidence / cfg.evidence_conf_ref, 1.0)
+    ev = min(evidence / cfg.evidence_conf_ref, 1.0)
+    if any(c.flash for c in cycles):  # вспышка повышает confidence и при flash_as_direct=false
+        ev = max(ev, cfg.flash_evidence)
+    if ev > 0:
         conf = 1.0 - (1.0 - conf) * (1.0 - cfg.evidence_weight * ev)
     neg = float(np.mean([c.neg_fraction for c in cycles])) if cycles else 0.0
     conf *= 1.0 - cfg.negative_penalty * neg
@@ -97,7 +110,7 @@ def build_events(
             conf = event_confidence(group, cfg)
             reason = ""
             neg = negative_cycle_fraction(group)
-            if not any(c.direct for c in group) and neg >= cfg.event_negative_fraction:
+            if not any(has_evidence(c, cfg) for c in group) and neg >= cfg.event_negative_fraction:
                 reason = f"objects_in_{neg:.0%}_cycles"
             events.append(
                 Event(

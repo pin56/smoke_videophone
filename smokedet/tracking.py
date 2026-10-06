@@ -19,7 +19,7 @@ from .io_video import VideoMeta, iter_sampled_frames
 
 log = logging.getLogger(__name__)
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2  # 2: замер света для вспышек (flash.LightMeter)
 
 
 @dataclass
@@ -29,6 +29,7 @@ class PersonObs:
     box: np.ndarray  # (4,) xyxy в пикселях исходного кадра
     score: float
     kpts: np.ndarray  # (17, 3): x, y, conf
+    light: Optional[np.ndarray] = None  # (3,): пересвет у рта/кистей и вокруг (px), scale; см. flash.py
 
 
 @dataclass
@@ -154,6 +155,9 @@ class PoseTracker:
                 kpts[i] = rk
 
     def run(self, meta: VideoMeta, stride: int, progress: bool = True) -> TrackSet:
+        from .flash import LightMeter  # flash → geometry → tracking: импорт здесь, иначе цикл
+
+        meter = LightMeter()
         tracks: Dict[int, List[PersonObs]] = {}
         n_processed = 0
         start = time.time()
@@ -171,7 +175,9 @@ class PoseTracker:
             res = self._track_frame(frame, first=n_processed == 0)
             n_processed += 1
             last_idx = frame_idx
+            t = frame_idx / meta.fps
             if res.boxes is None or res.boxes.id is None or len(res.boxes) == 0:
+                meter.measure(frame, t, [], [])  # фон обновляется и на кадрах без людей
                 continue
             boxes = res.boxes.xyxy.cpu().numpy().astype(np.float32)
             ids = res.boxes.id.int().cpu().numpy()
@@ -182,9 +188,9 @@ class PoseTracker:
                 kpts = np.zeros((len(boxes), 17, 3), np.float32)
             if self.refiner is not None:
                 self._refine(frame, boxes, kpts)
-            t = frame_idx / meta.fps
-            for box, tid, score, kp in zip(boxes, ids, scores, kpts):
-                tracks.setdefault(int(tid), []).append(PersonObs(frame_idx, t, box, float(score), kp))
+            lights = meter.measure(frame, t, boxes, kpts)
+            for box, tid, score, kp, light in zip(boxes, ids, scores, kpts, lights):
+                tracks.setdefault(int(tid), []).append(PersonObs(frame_idx, t, box, float(score), kp, light))
         if last_idx >= 0 and last_idx + 1 > meta.frame_count:
             meta.frame_count = last_idx + 1  # поток или неверный FRAME_COUNT в контейнере
         return TrackSet(meta=meta, stride=stride, tracks=tracks, processed_frames=n_processed, wall_time=time.time() - start)

@@ -43,6 +43,9 @@ class Cycle:
     neg_fraction: float = 0.0
     strong_negative: str = ""  # «чужой» предмет, уверенно найденный в нескольких кадрах
     objects: Dict[str, float] = field(default_factory=dict)
+    # заполняет flash.attach_flashes: рядом по времени была вспышка зажигалки
+    flash: bool = False
+    flash_area: float = 0.0
 
     @property
     def hold(self) -> float:
@@ -73,6 +76,8 @@ class Cycle:
             "neg_fraction": round(self.neg_fraction, 3),
             "strong_negative": self.strong_negative,
             "objects": {k: round(v, 3) for k, v in self.objects.items()},
+            "flash": self.flash,
+            "flash_area": round(self.flash_area, 3),
         }
 
 

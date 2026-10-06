@@ -1,4 +1,4 @@
-"""Обработанный ролик: зона интереса, рамки людей, подсветка паузы у рта и отметка события."""
+"""Обработанный ролик: зона интереса, рамки людей, подсветка паузы у рта, вспышки и отметка события."""
 from __future__ import annotations
 
 import logging
@@ -14,6 +14,7 @@ import numpy as np
 
 from .cycles import Cycle
 from .episodes import Event
+from .flash import Flash
 from .geometry import TrackSignal
 from .io_video import VideoMeta
 from .roi import Roi
@@ -21,6 +22,7 @@ from .roi import Roi
 log = logging.getLogger(__name__)
 
 RED, YELLOW, GREEN, GRAY, WHITE = (0, 0, 255), (0, 220, 255), (80, 200, 80), (150, 150, 150), (255, 255, 255)
+ORANGE = (0, 140, 255)
 
 
 def _label(frame, text, org, color, scale, thick):
@@ -49,12 +51,14 @@ def render_video(
     roi: Roi,
     title: str,
     start_time: Optional[str] = None,
+    flashes: Optional[Dict[int, List[Flash]]] = None,
 ) -> Path:
     by_frame: Dict[int, list] = defaultdict(list)
     for tid, sig in signals.items():
         for i, f in enumerate(sig.frame_idx):
             by_frame[int(f)].append((tid, i))
     holds = {tid: [(c.hold_start, c.hold_end) for c in cs if c.valid] for tid, cs in cycles.items()}
+    lit = {tid: [(f.start, f.end) for f in fs] for tid, fs in (flashes or {}).items()}
     shown = [e for e in events if e.passed]
     t0 = _start_datetime(start_time)
 
@@ -88,6 +92,8 @@ def render_video(
                 color = YELLOW if in_hold else (GREEN if sig.valid[i] else GRAY)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
                 _label(frame, f"id{tid}", (x1, y1 - 2), color, fscale * 0.8, thick)
+            if any(a <= t <= b for a, b in lit.get(tid, [])):
+                _label(frame, "FLASH", (x1, y2 + 4), ORANGE, fscale * 0.8, thick)
             if not np.isnan(sig.mouth[i]).any():
                 cv2.circle(frame, tuple(sig.mouth[i].astype(int)), 2 * thick, WHITE, -1)
             if not np.isnan(sig.hand[i]).any():

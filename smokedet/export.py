@@ -14,6 +14,7 @@ from . import __version__
 from .config import Config
 from .cycles import Cycle
 from .episodes import Event
+from .flash import Flash
 
 PRED_COLUMNS = [
     "camera_id", "clip_id", "event_id", "start_sec", "end_sec", "confidence", "label",
@@ -63,12 +64,19 @@ def write_processing_log(rows: List[dict], out_dir: Path) -> None:
         w.writerows(rows)
 
 
-def write_debug(out_dir: Path, clip_id: str, cycles: Dict[int, List[Cycle]], events: List[Event]) -> None:
+def write_debug(
+    out_dir: Path,
+    clip_id: str,
+    cycles: Dict[int, List[Cycle]],
+    events: List[Event],
+    flashes: Optional[Dict[int, List[Flash]]] = None,
+) -> None:
     path = out_dir / "debug" / f"{clip_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "events": [e.to_dict() for e in events],
         "cycles": [c.to_dict() for cs in cycles.values() for c in cs],
+        "flashes": [f.to_dict() for fs in (flashes or {}).values() for f in fs],
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 

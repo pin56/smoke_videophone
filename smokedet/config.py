@@ -93,6 +93,18 @@ class VerifierConfig:
 
 
 @dataclass
+class FlashConfig:
+    enabled: bool = True
+    min_area: float = 0.8  # новый пересвет у рта/кистей, в единицах scale^2
+    max_ring: float = 0.6  # пересвет вокруг человека выше — светлеет окружение (дверь, фары)
+    max_hand_dist: float = 1.5  # кисть не дальше от рта, в единицах нормировки
+    min_samples: int = 2  # отсчётов подряд: одиночный кадр — блик
+    max_gap: float = 0.35  # с между отсчётами одной вспышки
+    attach_before: float = 2.0  # с: цикл может начаться раньше вспышки на столько...
+    attach_after: float = 10.0  # ...или позже её на столько (прикуривание → затяжка)
+
+
+@dataclass
 class EpisodeConfig:
     window: float = 20.0  # два полных цикла в пределах 20 с
     min_cycles: int = 2
@@ -103,6 +115,8 @@ class EpisodeConfig:
     evidence_conf_ref: float = 0.4  # уверенность верификатора, считающаяся «полной»
     negative_penalty: float = 0.5
     event_negative_fraction: float = 0.5  # доля циклов с «чужим» предметом, отклоняющая событие
+    flash_as_direct: bool = True  # вспышка зажигалки — прямой признак (1 цикл + вспышка = эпизод)
+    flash_evidence: float = 1.0  # вклад вспышки в confidence, доля от полного прямого признака
 
 
 @dataclass
@@ -127,6 +141,7 @@ SECTIONS = {
     "geometry": GeometryConfig,
     "cycle": CycleConfig,
     "verifier": VerifierConfig,
+    "flash": FlashConfig,
     "episode": EpisodeConfig,
     "report": ReportConfig,
 }
@@ -140,6 +155,7 @@ class Config:
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     cycle: CycleConfig = field(default_factory=CycleConfig)
     verifier: VerifierConfig = field(default_factory=VerifierConfig)
+    flash: FlashConfig = field(default_factory=FlashConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
 

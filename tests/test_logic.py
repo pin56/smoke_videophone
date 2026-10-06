@@ -4,9 +4,10 @@ import json
 import numpy as np
 import pytest
 
-from smokedet.config import CycleConfig, EpisodeConfig, Config, VerifierConfig, load_config, with_overrides
+from smokedet.config import CycleConfig, EpisodeConfig, Config, FlashConfig, VerifierConfig, load_config, with_overrides
 from smokedet.cycles import detect_cycles
 from smokedet.episodes import build_events
+from smokedet.flash import Flash, LightMeter, attach_flashes, find_flashes
 from smokedet.evaluation import EvalParams, Item, evaluate
 from smokedet.geometry import TrackSignal, build_signal
 from smokedet.roi import Roi
@@ -265,3 +266,82 @@ def test_config_roundtrip():
     assert with_overrides(cfg, ["cycle.near_enter=0.5"]).cycle.near_enter == 0.5
     with pytest.raises(KeyError):
         load_config(None, ["cycle.unknown=1"])
+
+
+def _face_kpts():
+    """Те же точки, что в test_build_signal_geometry: scale = 40, правая кисть у рта."""
+    k = np.zeros((17, 3), np.float32)
+    k[:, 2] = 0.9
+    k[0, :2] = [125, 120]
+    k[1, :2], k[2, :2] = [120, 115], [130, 115]
+    k[3, :2], k[4, :2] = [112, 118], [138, 118]
+    k[5, :2], k[6, :2] = [105, 150], [145, 150]
+    k[7, :2], k[8, :2] = [100, 190], [150, 190]
+    k[9, :2], k[10, :2] = [100, 230], [128, 135]
+    return k
+
+
+def test_light_meter():
+    k, box = _face_kpts()[None], np.array([[95, 100, 155, 300]], np.float32)
+    bg = np.full((400, 400, 3), 90, np.uint8)
+    meter = LightMeter()
+    assert meter.measure(bg, 0.0, box, k) == [None]  # фона ещё нет
+    for t in (1.0, 2.0, 3.0):
+        meter.measure(bg, t, box, k)
+    flame = bg.copy()
+    flame[124:144, 118:138] = 255  # пересвет 20x20 у рта
+    zone, ring, scale = meter.measure(flame, 3.1, box, k)[0]
+    assert zone == pytest.approx(400, rel=0.15) and ring == 0 and scale == pytest.approx(40, abs=1)
+    door = bg.copy()
+    door[100:300, 156:186] = 255  # светлая дверь рядом с человеком, но не у лица
+    zone, ring, _ = meter.measure(door, 3.2, box, k)[0]
+    assert zone == 0 and ring == pytest.approx(6000, rel=0.15)
+
+
+def test_build_signal_light():
+    obs = [_obs(i / 10, 100, _face_kpts()) for i in range(5)]
+    obs[2].light = np.array([3200.0, 800.0, 40.0], np.float32)
+    sig = build_signal(1, obs, Roi.full(), Config().geometry, Config().tracking, 10.0)
+    assert sig.light_area[2] == pytest.approx(2.0) and sig.light_ring[2] == pytest.approx(0.5)
+    assert np.isnan(sig.light_area[0])
+
+
+def _lit(area_at, ring=0.0, d=0.3, n=100):
+    sig = make_signal(np.full(n, d))
+    sig.light_area, sig.light_ring = np.zeros(n), np.zeros(n)
+    for i, a in area_at.items():
+        sig.light_area[i], sig.light_ring[i] = a, ring
+    return sig
+
+
+def test_find_flashes():
+    cfg = FlashConfig()
+    flashes = find_flashes(_lit({50: 1.5, 51: 2.0, 52: 1.2}), cfg)
+    assert len(flashes) == 1
+    f = flashes[0]
+    assert (f.start, f.end, f.area) == (pytest.approx(5.0), pytest.approx(5.2), pytest.approx(2.0))
+    assert find_flashes(_lit({50: 2.0}), cfg) == []  # один отсчёт — блик
+    assert find_flashes(_lit({50: 2.0, 51: 2.0}, ring=1.5), cfg) == []  # светло и вокруг: дверь, фары
+    assert find_flashes(_lit({50: 2.0, 51: 2.0}, d=3.0), cfg) == []  # руки далеко от лица
+
+
+def test_flash_makes_single_puff_an_event():
+    sig = make_signal(puffs([5]))
+    cycles = detect_cycles(sig, CycleConfig())
+    attach_flashes(cycles, [Flash(1, 4.6, 4.9, 1.8, 0.1)], FlashConfig())  # прикуривание перед затяжкой
+    assert cycles[0].flash and not cycles[0].direct
+    events = build_events({1: cycles}, {1: sig}, EpisodeConfig())
+    assert len(events) == 1 and events[0].passed and events[0].flash
+    assert build_events({1: cycles}, {1: sig}, EpisodeConfig(flash_as_direct=False)) == []
+    late = detect_cycles(sig, CycleConfig())
+    attach_flashes(late, [Flash(1, 20.0, 20.3, 1.8, 0.1)], FlashConfig())  # вспышка намного позже цикла
+    assert not late[0].flash
+
+
+def test_flash_raises_confidence():
+    sig = make_signal(puffs([5, 12]))
+    plain = detect_cycles(sig, CycleConfig())
+    lit = detect_cycles(sig, CycleConfig())
+    attach_flashes(lit, [Flash(1, 4.6, 4.9, 1.8, 0.1)], FlashConfig())
+    cfg = EpisodeConfig()
+    assert build_events({1: lit}, {1: sig}, cfg)[0].confidence > build_events({1: plain}, {1: sig}, cfg)[0].confidence

@@ -1,4 +1,4 @@
-"""Оркестрация обработки клипа: трекинг (с кэшем) → сигналы → циклы → верификатор → события → выход."""
+"""Оркестрация обработки клипа: трекинг (с кэшем) → сигналы → циклы → верификатор → вспышки → события → выход."""
 from __future__ import annotations
 
 import csv
@@ -6,13 +6,14 @@ import dataclasses
 import hashlib
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import Config
 from .cycles import Cycle, detect_cycles
 from .episodes import Event, build_events
+from .flash import Flash, attach_flashes, find_flashes
 from .geometry import TrackSignal, build_signal
 from .io_video import frame_stride, probe_video
 from .roi import Roi
@@ -38,6 +39,7 @@ class Analysis:
     signals: Dict[int, TrackSignal]
     cycles: Dict[int, List[Cycle]]
     events: List[Event]
+    flashes: Dict[int, List[Flash]] = field(default_factory=dict)
 
 
 def project_path(path: str) -> str:
@@ -130,8 +132,15 @@ class Pipeline:
         cycles = {tid: detect_cycles(sig, cfg.cycle) for tid, sig in signals.items()}
         if self.verifier is not None and cfg.verifier.enabled:
             self.verifier.verify(clip.clip_id, clip.video_path, cycles, signals, cfg.verifier)
+        flashes: Dict[int, List[Flash]] = {}
+        if cfg.flash.enabled:  # после верификатора: вспышка отмечает только оставшиеся валидными циклы
+            for tid, sig in signals.items():
+                track_flashes = find_flashes(sig, cfg.flash)
+                if track_flashes:
+                    flashes[tid] = track_flashes
+                    attach_flashes(cycles[tid], track_flashes, cfg.flash)
         events = build_events(cycles, signals, cfg.episode)
-        return Analysis(signals=signals, cycles=cycles, events=events)
+        return Analysis(signals=signals, cycles=cycles, events=events, flashes=flashes)
 
     def process(self, clip: ClipInput, out_dir: Path, render: bool = False, use_cache: bool = True):
         from .export import event_records, write_debug
@@ -145,19 +154,21 @@ class Pipeline:
         if render:
             roi = Roi.load(clip.roi_path, ts.meta.width, ts.meta.height)
             path = render_video(ts.meta, ts.stride, out_dir / "rendered" / f"{clip.clip_id}.mp4", analysis.signals,
-                                analysis.cycles, analysis.events, roi, f"{clip.camera_id}/{clip.clip_id}", clip.start_time)  # fmt: skip
+                                analysis.cycles, analysis.events, roi, f"{clip.camera_id}/{clip.clip_id}", clip.start_time,
+                                analysis.flashes)  # fmt: skip
             log.info("[%s] ролик с разметкой: %s", clip.clip_id, path)
         t3 = time.time()
 
         records = event_records(analysis.events, clip.camera_id, clip.clip_id)
-        write_debug(out_dir, clip.clip_id, analysis.cycles, analysis.events)
+        write_debug(out_dir, clip.clip_id, analysis.cycles, analysis.events, analysis.flashes)
         from_cache = ts.extra.get("from_cache") == "1"
         tracking_sec = ts.wall_time if from_cache else t1 - t0
         total = tracking_sec + (t3 - t1)
         n_cycles = sum(len(cs) for cs in analysis.cycles.values())
         n_valid = sum(c.valid for cs in analysis.cycles.values() for c in cs)
-        log.info("[%s] треков %d, циклов %d (валидных %d), событий %d", clip.clip_id, len(analysis.signals),
-                 n_cycles, n_valid, len(records))  # fmt: skip
+        n_flashes = sum(len(f) for f in analysis.flashes.values())
+        log.info("[%s] треков %d, циклов %d (валидных %d), вспышек %d, событий %d", clip.clip_id, len(analysis.signals),
+                 n_cycles, n_valid, n_flashes, len(records))  # fmt: skip
         log_row = {
             "camera_id": clip.camera_id,
             "clip_id": clip.clip_id,

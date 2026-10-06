@@ -40,6 +40,8 @@ class TrackSignal:
     wrist_dy: np.ndarray  # (N,) (y запястья - y рта) / scale: > 0 — запястье ниже рта
     elbow_raise: np.ndarray  # (N,) (y плеча - y локтя) / scale: > 0 — локоть выше плеча
     face_visible: np.ndarray  # (N,) 1 — нос найден уверенно, 0 — рот оценён по глазам/ушам
+    light_area: Optional[np.ndarray] = None  # (N,) новый пересвет у рта/кистей / scale^2 (flash.py)
+    light_ring: Optional[np.ndarray] = None  # (N,) новый пересвет вокруг человека / scale^2
 
     def __len__(self) -> int:
         return len(self.t)
@@ -173,6 +175,13 @@ def build_signal(
         hand[i], d_raw[i], ear_ratio[i], wrist_above[i], wconf, wrist_dy[i], elbow_raise[i] = res
         kconf[i] = min(face_conf, wconf)
 
+    light_area = np.full(n, np.nan)
+    light_ring = np.full(n, np.nan)
+    for i, o in enumerate(obs):
+        if o.light is not None:
+            zone, ring, s = (float(v) for v in o.light)
+            light_area[i], light_ring[i] = zone / s**2, ring / s**2
+
     d_raw[~valid] = np.nan
     d = rolling_nanmedian(d_raw, geo.smooth_window)
     d[~valid] = np.nan
@@ -193,4 +202,6 @@ def build_signal(
         wrist_dy=wrist_dy,
         elbow_raise=elbow_raise,
         face_visible=face_visible,
+        light_area=light_area,
+        light_ring=light_ring,
     )
