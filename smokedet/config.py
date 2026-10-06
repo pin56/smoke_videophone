@@ -1,0 +1,191 @@
+"""Конфигурация пайплайна: dataclass-схема, загрузка из YAML и переопределения из CLI (--set key=value)."""
+from __future__ import annotations
+
+import copy
+import dataclasses
+import hashlib
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
+
+
+@dataclass
+class VideoConfig:
+    target_fps: float = 10.0  # частота анализа; остальные кадры пропускаются
+    fallback_fps: float = 25.0  # если в контейнере нет корректного FPS
+
+
+@dataclass
+class DetectorConfig:
+    pose_model: str = "weights/yolo11m-pose.pt"
+    imgsz: int = 1280  # CCTV: люди мелкие, поэтому вход больше стандартных 640
+    conf: float = 0.1  # низкий порог: ByteTrack использует слабые детекции во втором проходе
+    iou: float = 0.6
+    tracker: str = "configs/bytetrack_cctv.yaml"
+    device: str = "auto"  # auto | cpu | mps | 0
+    half: bool = False
+    refine_small: bool = True  # повторная поза на увеличенном кропе для мелких людей
+    refine_max_height: int = 220
+    refine_imgsz: int = 320
+    refine_pad: float = 0.15
+
+
+@dataclass
+class TrackingConfig:
+    min_person_height: int = 72  # по правилам 80px; запас вниз почти не штрафуется (IGNORE)
+    roi_anchor: str = "feet"  # feet | center | head — какая точка человека должна быть в зоне
+    stitch_max_gap: float = 2.0  # сек между концом одного трека и началом другого
+    stitch_max_dist: float = 0.6  # расстояние центров в высотах bbox
+
+
+@dataclass
+class GeometryConfig:
+    min_kpt_conf: float = 0.3
+    hand_extrapolation: float = 0.3  # кисть = запястье + k * (запястье - локоть)
+    scale_bbox_ratio: float = 0.12  # нижняя граница нормировки: доля высоты bbox
+    scale_window: float = 2.0  # сек, скользящая медиана нормировки
+    smooth_window: int = 3  # отсчётов, медианное сглаживание d(t)
+
+
+@dataclass
+class CycleConfig:
+    near_enter: float = 0.6  # d ниже — кисть у рта
+    near_exit: float = 0.9  # d выше — кисть отведена (гистерезис)
+    min_hold: float = 0.4  # по правилам ~0.5 с, с допуском на дискретизацию
+    max_hold: float = 6.0  # по правилам ~5 с
+    max_missing: float = 0.6  # сек пропуска точек, допустимые внутри паузы
+    lookaround: float = 2.0  # сек до/после паузы для поиска фаз подхода и отвода
+    phone_ear_ratio: float = 0.75  # d(кисть, ухо) / d(кисть, рот) ниже — похоже на телефон
+    min_wrist_above_elbow: float = 0.5  # доля кадров паузы, где запястье выше локтя
+
+
+@dataclass
+class VerifierConfig:
+    enabled: bool = True
+    model: str = "weights/yolov8s-worldv2.pt"  # open-vocabulary: YOLO-World или YOLOE
+    fallback_model: str = "weights/yolo11s.pt"  # COCO-модель, если open-vocab недоступен
+    imgsz: int = 640
+    conf: float = 0.12
+    frames_per_cycle: int = 4
+    crop_margin: float = 0.9  # поле вокруг рта и кисти в единицах нормировки
+    positive_classes: List[str] = field(
+        default_factory=lambda: ["cigarette", "vape", "electronic cigarette", "smoke", "vapor cloud"]
+    )
+    negative_classes: List[str] = field(
+        default_factory=lambda: ["bottle", "cup", "mug", "drinking glass", "cell phone", "sandwich", "food"]
+    )
+    direct_min_frames: int = 2  # прямой признак: предмет в нескольких соседних кадрах
+    negative_min_fraction: float = 0.5  # доля кропов с «чужим» предметом, чтобы отбросить цикл
+
+
+@dataclass
+class EpisodeConfig:
+    window: float = 20.0  # два полных цикла в пределах 20 с
+    min_cycles: int = 2
+    merge_gap: float = 15.0  # циклы одного человека объединяются при паузе <= 15 с
+    confidence_threshold: float = 0.5
+    cycle_weight: float = 0.45  # вклад одного идеального цикла в confidence
+    evidence_weight: float = 0.6  # вклад прямого признака
+    evidence_conf_ref: float = 0.4  # уверенность верификатора, считающаяся «полной»
+    negative_penalty: float = 0.5
+
+
+@dataclass
+class ReportConfig:
+    team: str = ""
+    model_version: str = "smokedet-0.1.0"
+    data_sources: List[str] = field(
+        default_factory=lambda: [
+            "COCO (предобучение YOLO11-pose, Ultralytics)",
+            "Objects365/GoldG (предобучение YOLO-World, Ultralytics)",
+            "Эталонный набор организатора — только подбор порогов",
+        ]
+    )
+    fine_tuning: str = "нет: используются предобученные веса, на данных объекта подбираются только пороги"
+    notes: str = ""
+
+
+SECTIONS = {
+    "video": VideoConfig,
+    "detector": DetectorConfig,
+    "tracking": TrackingConfig,
+    "geometry": GeometryConfig,
+    "cycle": CycleConfig,
+    "verifier": VerifierConfig,
+    "episode": EpisodeConfig,
+    "report": ReportConfig,
+}
+
+
+@dataclass
+class Config:
+    video: VideoConfig = field(default_factory=VideoConfig)
+    detector: DetectorConfig = field(default_factory=DetectorConfig)
+    tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    geometry: GeometryConfig = field(default_factory=GeometryConfig)
+    cycle: CycleConfig = field(default_factory=CycleConfig)
+    verifier: VerifierConfig = field(default_factory=VerifierConfig)
+    episode: EpisodeConfig = field(default_factory=EpisodeConfig)
+    report: ReportConfig = field(default_factory=ReportConfig)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    def hash(self, sections: Optional[List[str]] = None) -> str:
+        data = self.to_dict()
+        if sections is not None:
+            data = {k: data[k] for k in sections}
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _section_from_dict(cls, data: Dict[str, Any]):
+    names = {f.name for f in dataclasses.fields(cls)}
+    unknown = set(data) - names
+    if unknown:
+        raise KeyError(f"Неизвестные параметры в секции {cls.__name__}: {sorted(unknown)}")
+    return cls(**data)
+
+
+def config_from_dict(data: Dict[str, Any]) -> Config:
+    unknown = set(data) - set(SECTIONS)
+    if unknown:
+        raise KeyError(f"Неизвестные секции конфигурации: {sorted(unknown)}")
+    return Config(**{name: _section_from_dict(cls, data.get(name) or {}) for name, cls in SECTIONS.items()})
+
+
+def apply_overrides(data: Dict[str, Any], overrides: List[str]) -> Dict[str, Any]:
+    """Применяет переопределения вида ``episode.confidence_threshold=0.6``."""
+    data = copy.deepcopy(data)
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"Ожидается KEY=VALUE, получено: {item}")
+        key, raw = item.split("=", 1)
+        parts = key.strip().split(".")
+        if len(parts) != 2:
+            raise ValueError(f"Ключ должен быть вида секция.параметр: {key}")
+        section, name = parts
+        data.setdefault(section, {})
+        data[section][name] = yaml.safe_load(raw)
+    return data
+
+
+def load_config(path: Optional[str] = None, overrides: Optional[List[str]] = None) -> Config:
+    data: Dict[str, Any] = {}
+    if path:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    data = apply_overrides(data, overrides or [])
+    return config_from_dict(data)
+
+
+def with_overrides(cfg: Config, overrides: List[str]) -> Config:
+    return config_from_dict(apply_overrides(cfg.to_dict(), overrides))
+
+
+def resolve_path(path: str, base: Path) -> str:
+    """Относительные пути из конфигов и CSV считаются от корня проекта / файла списка."""
+    p = Path(path)
+    return str(p if p.is_absolute() else (base / p))
