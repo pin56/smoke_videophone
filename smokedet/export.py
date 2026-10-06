@@ -141,7 +141,8 @@ def write_manifest(out_dir: Path, cfg: Config, device: str, verifier: Optional[d
             "verifier": None if verifier is None else {**verifier, "sha256": file_sha256(verifier["weights"]),
                                                        "license": "AGPL-3.0 (Ultralytics)"},
         },  # fmt: skip
-        "prompts": None if verifier is None else verifier.get("positive_classes", []) + verifier.get("negative_classes", []),
+        "prompts": None if verifier is None else (verifier.get("positive_classes", []) + verifier.get("negative_classes", [])
+                                                  + verifier.get("track_negative_classes", [])),
         "data_sources": cfg.report.data_sources,
         "fine_tuning": cfg.report.fine_tuning,
         "hardware": hardware_info(device),
