@@ -90,6 +90,14 @@ class VerifierConfig:
     negative_min_fraction: float = 0.5  # доля кропов с «чужим» предметом, чтобы отбросить цикл
     strong_negative_conf: float = 0.25  # сильный негатив: предмет с такой уверенностью...
     strong_negative_frames: int = 2  # ...минимум в стольких кадрах цикла отбрасывает цикл
+    # «двойники» сигареты: ищутся по всему треку (палочку в паузе детектор принимает за сигарету).
+    # «lollipop stick» / «candy on a stick» сюда не годятся: срабатывают на настоящие сигареты
+    track_negative_classes: List[str] = field(default_factory=lambda: ["lollipop"])
+    track_scan_step: float = 0.5  # с между просматриваемыми кадрами трека; 0 — отключить
+    track_negative_conf: float = 0.5  # уверенность находки
+    track_negative_radius: float = 1.0  # центр предмета не дальше от кисти или рта, в единицах нормировки
+    track_negative_frames: int = 3  # столько кадров с находкой в окне вокруг цикла отбрасывают цикл
+    track_negative_window: float = 60.0  # с, окно вокруг пика цикла; 0 — весь трек
 
 
 @dataclass

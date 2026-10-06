@@ -12,7 +12,7 @@ from smokedet.evaluation import EvalParams, Item, evaluate
 from smokedet.geometry import TrackSignal, build_signal
 from smokedet.roi import Roi
 from smokedet.tracking import PersonObs, stitch_tracks
-from smokedet.verifier import ObjectVerifier
+from smokedet.verifier import ObjectVerifier, reject_by_track_objects, scan_indices
 
 FPS = 10.0
 
@@ -157,6 +157,29 @@ def test_weak_negative_and_positive_do_not_reject():
     c = _cycle()  # сигарета рядом с бутылкой: цикл остаётся
     v._aggregate(c, [{"bottle": 0.6, "cigarette": 0.3}, {"bottle": 0.6}, {}, {}, {}, {}], cfg)
     assert c.valid and c.strong_negative == "bottle"
+
+
+def test_track_object_rejects_nearby_cycles():
+    sig = make_signal(puffs([5, 15, 150, 160], total=180))
+    cycles = detect_cycles(sig, CycleConfig())
+    assert len(cycles) == 4 and all(c.valid for c in cycles)
+    cycles[0].direct = True  # палочку чупа-чупса в паузе приняли за сигарету
+    cfg = VerifierConfig()
+    reject_by_track_objects(cycles, [(40.0, "lollipop"), (41.0, "lollipop")], cfg)
+    assert all(c.valid for c in cycles)  # находок меньше track_negative_frames — циклы остаются
+    reject_by_track_objects(cycles, [(40.0, "lollipop"), (41.0, "lollipop"), (60.0, "lollipop")], cfg)
+    assert [c.valid for c in cycles] == [False, False, True, True]  # дальние циклы вне окна 60 с
+    assert cycles[0].reject_reason == "track_object:lollipop" and not cycles[0].direct
+    events = build_events({1: cycles}, {1: sig}, EpisodeConfig())
+    assert len(events) == 1 and events[0].start > 100
+
+
+def test_scan_indices_step_and_validity():
+    sig = make_signal(np.full(40, 1.5))
+    sig.valid[10:20] = False
+    sig.mouth[25] = np.nan
+    ks = scan_indices(sig, 0.5)  # 10 отсчётов/с → каждый 5-й
+    assert ks == [0, 5, 20, 26, 31, 36]
 
 
 def test_negatives_in_most_cycles_reject_event():
