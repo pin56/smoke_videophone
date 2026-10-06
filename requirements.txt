@@ -1,9 +1,16 @@
-ultralytics>=8.3.0
-opencv-python>=4.8
-numpy>=1.23
-pyyaml>=6.0
-tqdm
-lap>=0.5.12  # ассоциация в ByteTrack; ultralytics ставит его сам только при наличии pip
+# Прямые зависимости. Проверенное окружение целиком (Windows, Python 3.11, CUDA 12.6) — requirements.lock.
+#
+# torch/torchvision ставятся отдельно, под своё железо (иначе ultralytics подтянет сборку с PyPI):
+#   NVIDIA, CUDA 12.6 (проверено на torch 2.14.1+cu126):
+#     uv pip install --python <python венва> torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu126
+#   macOS (MPS) или только CPU:
+#     uv pip install --python <python венва> torch==2.14.1 torchvision==0.29.1
+ultralytics==8.4.173  # код рассчитывает на поведение 8.4 (см. PoseTracker._half)
+opencv-python==5.0.0.93  # чтение кадров и их pts (CAP_PROP_POS_MSEC) проверены на этой сборке
+numpy>=2.0,<3
+pyyaml>=6.0,<7
+tqdm>=4.66,<5
+lap>=0.5.12,<0.6  # ассоциация в ByteTrack; ultralytics ставит его сам только при наличии pip
 # текстовый энкодер для open-vocab верификатора (YOLO-World); без него — откат на COCO-детектор
-clip @ git+https://github.com/ultralytics/CLIP.git
-pytest
+clip @ git+https://github.com/ultralytics/CLIP.git@a13192f8cb767260d7dfd98c843b0716593169e7
+pytest>=8,<10

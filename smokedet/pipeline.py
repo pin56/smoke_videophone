@@ -49,6 +49,18 @@ def project_path(path: str) -> str:
     return str(p if p.is_absolute() else ROOT / p)
 
 
+def track_cache_key(video_path: str, cfg_hash: str, tracker_yaml: str) -> str:
+    """Ключ кэша треков: видео (путь, размер, mtime), секции detector/video и содержимое YAML трекера.
+
+    В конфиге трекер задан путём, поэтому правка самого bytetrack_cctv.yaml без хэша файла не сбросила бы кэш.
+    """
+    p = Path(video_path)
+    stat = f"{p.stat().st_size}:{p.stat().st_mtime_ns}" if p.exists() else "stream"
+    t = Path(tracker_yaml)
+    tracker = hashlib.sha256(t.read_bytes()).hexdigest()[:16] if t.is_file() else tracker_yaml
+    return hashlib.sha256(f"{p.resolve() if p.exists() else video_path}|{stat}|{cfg_hash}|{tracker}".encode()).hexdigest()[:16]
+
+
 def read_inputs_csv(path: str) -> List[ClipInput]:
     """CSV: video_path,camera_id[,clip_id,start_time,roi]. Пути — относительно файла списка."""
     base = Path(path).resolve().parent
@@ -96,10 +108,7 @@ class Pipeline:
         return self._tracker
 
     def _cache_key(self, video_path: str) -> str:
-        p = Path(video_path)
-        stat = f"{p.stat().st_size}:{p.stat().st_mtime_ns}" if p.exists() else "stream"
-        cfg_part = self.cfg.hash(["detector", "video"])
-        return hashlib.sha256(f"{p.resolve() if p.exists() else video_path}|{stat}|{cfg_part}".encode()).hexdigest()[:16]
+        return track_cache_key(video_path, self.cfg.hash(["detector", "video"]), project_path(self.cfg.detector.tracker))
 
     def track(self, clip: ClipInput, cache_dir: Optional[Path] = None) -> TrackSet:
         """Самая дорогая стадия; результат кэшируется (ключ — видео + секции detector/video конфига)."""

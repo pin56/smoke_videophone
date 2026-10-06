@@ -48,9 +48,38 @@ def frame_stride(fps: float, target_fps: float) -> int:
     return max(1, int(round(fps / max(target_fps, 1e-6))))
 
 
-def iter_sampled_frames(path: str, stride: int) -> Iterator[Tuple[int, np.ndarray]]:
-    """Отдаёт (индекс кадра, кадр) для каждого stride-го кадра; пропущенные кадры только grab()."""
+class FrameClock:
+    """Время кадра: pts из контейнера (CAP_PROP_POS_MSEC после read/grab), иначе idx/fps.
+
+    В CCTV-файлах с переменным fps idx/fps уходит от реального времени (до 0.7 с на клип). pts считается
+    негодным, если он не растёт, после первого кадра равен 0 или дальше MAX_DRIFT от idx/fps (потоки,
+    битые контейнеры). Тогда до конца клипа время — idx/fps со сдвигом последнего годного pts, без скачка.
+    """
+
+    MAX_DRIFT = 2.0  # с
+
+    def __init__(self, fps: float):
+        self.fps = fps
+        self.offset: Optional[float] = None  # не None — pts отброшен, время = idx/fps + offset
+        self.last = -1.0
+
+    def time(self, idx: int, pos_msec: float) -> float:
+        nominal = idx / self.fps
+        if self.offset is None:
+            t = pos_msec / 1000.0
+            if t > self.last and (t > 0 or idx == t == 0) and abs(t - nominal) <= self.MAX_DRIFT:
+                self.last = t
+                return t
+            self.offset = max(self.last, 0.0) - (idx - 1) / self.fps if idx > 0 else 0.0
+        t = max(nominal + self.offset, self.last + 1e-3)
+        self.last = t
+        return t
+
+
+def iter_sampled_frames(path: str, stride: int, fps: float) -> Iterator[Tuple[int, float, np.ndarray]]:
+    """Отдаёт (индекс кадра, время, с; кадр) для каждого stride-го кадра; пропущенные кадры только grab()."""
     cap = _open(path)
+    clock = FrameClock(fps)
     idx = 0
     try:
         while True:
@@ -58,9 +87,11 @@ def iter_sampled_frames(path: str, stride: int) -> Iterator[Tuple[int, np.ndarra
                 ok, frame = cap.read()
                 if not ok:
                     break
-                yield idx, frame
+                yield idx, clock.time(idx, cap.get(cv2.CAP_PROP_POS_MSEC)), frame
             elif not cap.grab():
                 break
+            else:
+                clock.time(idx, cap.get(cv2.CAP_PROP_POS_MSEC))  # следим за pts и на пропущенных кадрах
             idx += 1
     finally:
         cap.release()
