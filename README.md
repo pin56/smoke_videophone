@@ -44,8 +44,20 @@ uv venv .venv --python 3.11 && uv pip install --python .venv/bin/python -r requi
 source .venv/bin/activate
 ```
 
-Веса (`weights/yolo11m-pose.pt`, `weights/yolov8s-worldv2.pt`) и CLIP скачиваются при первом запуске.
-**Сделайте первый запуск до выезда на объект** — там может не быть интернета.
+На Windows интерпретатор — `.venv/Scripts/python.exe`. torch ставится под своё железо (команды — в начале
+`requirements.txt`). Точная копия проверенного окружения (Windows, CUDA 12.6):
+
+```bash
+uv pip install --python .venv/Scripts/python.exe -r requirements.lock     --extra-index-url https://download.pytorch.org/whl/cu126 --index-strategy unsafe-best-match
+```
+
+Веса и офлайн-словарь верификатора — **до выезда на объект**, там может не быть интернета:
+
+```bash
+python tools/prepare_weights.py   # weights/: pose, YOLO-World, COCO-откат yolo11s.pt + словарь *-vocab-<хэш>.pt
+```
+
+С запечённым словарём прогону не нужен CLIP. Если поменяли списки классов верификатора — запустите скрипт снова.
 
 ## Запуск
 
@@ -136,7 +148,7 @@ python -m pytest -q tests
 ## Данные, модели, лицензии
 
 - Предобученные веса Ultralytics (YOLO11-pose — COCO; YOLO-World v2 — Objects365/GoldG), лицензия **AGPL-3.0**. Дообучения нет.
-- Промпты верификатора — `verifier.positive_classes` / `negative_classes` / `track_negative_classes` в конфиге (дублируются в `manifest.json`).
+- Промпты верификатора — `verifier.positive_classes` / `negative_classes` / `track_negative_classes` / `track_drink_classes` в конфиге (дублируются в `manifest.json`).
 - Обработка локальная. Исходные записи объекта не публикуются и не коммитятся (`data/`, `*.mp4` в `.gitignore`).
 
 ## Ограничения
