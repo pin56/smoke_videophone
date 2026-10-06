@@ -30,6 +30,9 @@ class Cycle:
     kconf: float
     ear_ratio: float
     wrist_above: float
+    wrist_dy: float  # медиана за паузу; < 0 — запястье выше рта
+    elbow_raise: float  # медиана за паузу; > 0 — локоть выше плеча
+    face_visible: float  # доля кадров паузы, где нос найден уверенно
     quality: float = 0.0
     valid: bool = True
     reject_reason: str = ""
@@ -38,6 +41,7 @@ class Cycle:
     pos_frames: int = 0
     pos_conf: float = 0.0
     neg_fraction: float = 0.0
+    strong_negative: str = ""  # «чужой» предмет, уверенно найденный в нескольких кадрах
     objects: Dict[str, float] = field(default_factory=dict)
 
     @property
@@ -57,6 +61,9 @@ class Cycle:
             "kconf": round(self.kconf, 3),
             "ear_ratio": None if np.isnan(self.ear_ratio) else round(self.ear_ratio, 3),
             "wrist_above": None if np.isnan(self.wrist_above) else round(self.wrist_above, 3),
+            "wrist_dy": None if np.isnan(self.wrist_dy) else round(self.wrist_dy, 3),
+            "elbow_raise": None if np.isnan(self.elbow_raise) else round(self.elbow_raise, 3),
+            "face_visible": round(self.face_visible, 3),
             "quality": round(self.quality, 3),
             "valid": self.valid,
             "reject_reason": self.reject_reason,
@@ -64,6 +71,7 @@ class Cycle:
             "pos_frames": self.pos_frames,
             "pos_conf": round(self.pos_conf, 3),
             "neg_fraction": round(self.neg_fraction, 3),
+            "strong_negative": self.strong_negative,
             "objects": {k: round(v, 3) for k, v in self.objects.items()},
         }
 
@@ -136,6 +144,17 @@ def _make_cycle(sig: TrackSignal, cfg: CycleConfig, hs: int, he: int, exit_i: in
         reasons.append("phone_like")
     if not np.isnan(above) and above < cfg.min_wrist_above_elbow:
         reasons.append("hand_low")
+    # рука у лба/волос/капюшона, а не у рта: запястье выше рта или локоть поднят выше плеча
+    wrist_dy = _nanmedian(sig.wrist_dy[idx])
+    elbow_raise = _nanmedian(sig.elbow_raise[idx])
+    if (not np.isnan(wrist_dy) and wrist_dy < -cfg.max_wrist_above_mouth) or (
+        not np.isnan(elbow_raise) and elbow_raise > cfg.max_elbow_raise
+    ):
+        reasons.append("hand_above_mouth")
+    # без носа рот оценивается по глазам/ушам — положение рта ненадёжно (затылок, поворот головы)
+    face_visible = float(np.mean(sig.face_visible[idx]))
+    if face_visible < cfg.min_face_visible:
+        reasons.append("face_hidden")
 
     cycle = Cycle(
         track_id=sig.track_id,
@@ -149,6 +168,9 @@ def _make_cycle(sig: TrackSignal, cfg: CycleConfig, hs: int, he: int, exit_i: in
         kconf=kconf,
         ear_ratio=ear,
         wrist_above=above,
+        wrist_dy=wrist_dy,
+        elbow_raise=elbow_raise,
+        face_visible=face_visible,
         quality=cycle_quality(hold, d_min, kconf, cfg),
         valid=not reasons,
         reject_reason=",".join(reasons),

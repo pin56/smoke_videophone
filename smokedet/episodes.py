@@ -3,7 +3,9 @@
 Цикл «квалифицирован», если в пределах окна 20 с у того же человека есть ещё полный цикл
 (всего >= min_cycles в окне) или у самого цикла есть прямой признак (предмет/дым).
 Квалифицированные циклы одного человека объединяются в событие при паузе <= 15 с.
-События разных людей не объединяются.
+События разных людей не объединяются. Событие без прямого признака отклоняется, если «чужие»
+предметы (питьё, еда) видны в большинстве его циклов: по отдельности слабые детекции
+не отбрасывают циклы, но их повторяемость по событию — надёжный признак.
 """
 from __future__ import annotations
 
@@ -26,7 +28,8 @@ class Event:
     box: np.ndarray
     confidence: float
     cycles: List[Cycle]
-    passed: bool  # confidence >= порога
+    passed: bool  # confidence >= порога и событие не отклонено
+    reject_reason: str = ""
 
     @property
     def direct(self) -> bool:
@@ -43,6 +46,7 @@ class Event:
             "passed": self.passed,
             "n_cycles": len(self.cycles),
             "direct": self.direct,
+            "reject_reason": self.reject_reason,
         }
 
 
@@ -55,6 +59,11 @@ def qualifying_cycles(cycles: List[Cycle], cfg: EpisodeConfig) -> List[Cycle]:
             for j in members:
                 qual[j] = True
     return [c for c, q in zip(good, qual) if q]
+
+
+def negative_cycle_fraction(cycles: List[Cycle]) -> float:
+    """Доля циклов, в которых верификатор видел «чужой» предмет."""
+    return float(np.mean([c.neg_fraction > 0 for c in cycles])) if cycles else 0.0
 
 
 def event_confidence(cycles: List[Cycle], cfg: EpisodeConfig) -> float:
@@ -86,6 +95,10 @@ def build_events(
         for group in groups:
             best = max(group, key=lambda c: c.quality)
             conf = event_confidence(group, cfg)
+            reason = ""
+            neg = negative_cycle_fraction(group)
+            if not any(c.direct for c in group) and neg >= cfg.event_negative_fraction:
+                reason = f"objects_in_{neg:.0%}_cycles"
             events.append(
                 Event(
                     track_id=tid,
@@ -95,7 +108,8 @@ def build_events(
                     box=sig.boxes[sig.index_at(best.peak)].copy(),
                     confidence=conf,
                     cycles=group,
-                    passed=conf >= cfg.confidence_threshold,
+                    passed=conf >= cfg.confidence_threshold and not reason,
+                    reject_reason=reason,
                 )
             )
     events.sort(key=lambda e: (e.start, e.track_id))

@@ -1,8 +1,10 @@
 """Верификатор предметов: open-vocabulary детектор на кропах «рот + кисть» в момент паузы.
 
-Позитивные классы (сигарета, вейп, дым) дают прямой признак; «чужие» предметы (бутылка, чашка,
-телефон, еда) отбрасывают цикл или снижают confidence. Если open-vocab модель недоступна
-(нет CLIP / весов), используется COCO-детектор только с негативными классами.
+Позитивные классы (сигарета, вейп, дым) дают прямой признак; «чужие» предметы (бутылка, банка,
+чашка, телефон, еда) отбрасывают цикл или снижают confidence. Каждый кадр смотрится в двух
+масштабах: узкий кроп — для мелких предметов, широкий — для банок и бутылок, которые узкий
+обрезает. Если open-vocab модель недоступна (нет CLIP / весов), используется COCO-детектор
+только с негативными классами.
 """
 from __future__ import annotations
 
@@ -40,6 +42,15 @@ def make_crop(frame: np.ndarray, mouth: np.ndarray, hand: np.ndarray, scale: flo
     return frame[y1:y2, x1:x2].copy()
 
 
+def merge_detections(dets: List[Dict[str, float]]) -> Dict[str, float]:
+    """Объединяет детекции одного кадра по нескольким кропам: максимум уверенности по классу."""
+    out: Dict[str, float] = {}
+    for det in dets:
+        for name, conf in det.items():
+            out[name] = max(out.get(name, 0.0), conf)
+    return out
+
+
 def pick_evenly(items: List[int], n: int) -> List[int]:
     if len(items) <= n:
         return list(items)
@@ -70,8 +81,8 @@ class ObjectVerifier:
         self.model = model
         names = model.names
         self.names = names if isinstance(names, dict) else dict(enumerate(names))
-        # кэш детекций по (clip_id, track_id, frame_idx): tune.py не перечитывает видео
-        self.cache: Dict[Tuple[str, int, int], Dict[str, float]] = {}
+        # кэш детекций по (clip_id, track_id, frame_idx, поле кропа): tune.py не перечитывает видео
+        self.cache: Dict[Tuple[str, int, int, float], Dict[str, float]] = {}
 
     def describe(self) -> dict:
         return {
@@ -104,33 +115,35 @@ class ObjectVerifier:
         signals: Dict[int, TrackSignal],
         cfg: VerifierConfig,
     ) -> None:
-        """Заполняет у валидных циклов поля direct / pos_* / neg_fraction / objects."""
-        requests = []  # (frame_idx, track_id, sample_idx)
+        """Заполняет у валидных циклов поля direct / pos_* / neg_fraction / strong_negative / objects."""
+        margins = [cfg.crop_margin] + ([cfg.wide_crop_margin] if cfg.wide_crop_margin > 0 else [])
+        requests = []  # (frame_idx, track_id, sample_idx, margin)
         for tid, track_cycles in cycles.items():
             sig = signals[tid]
             for c in track_cycles:
                 if c.valid:
                     for k in pick_evenly(c.hold_idx, cfg.frames_per_cycle):
-                        requests.append((int(sig.frame_idx[k]), tid, k))
-        todo = sorted({r for r in requests if (clip_id, r[1], r[0]) not in self.cache})
+                        requests.extend((int(sig.frame_idx[k]), tid, k, m) for m in margins)
+        todo = sorted({r for r in requests if (clip_id, r[1], r[0], r[3]) not in self.cache})
         if todo:
             crops, keys = [], []
             with FrameReader(video_path) as reader:
                 frame_cache: Optional[Tuple[int, np.ndarray]] = None
-                for frame_idx, tid, k in todo:
+                for frame_idx, tid, k, margin in todo:
+                    key = (clip_id, tid, frame_idx, margin)
                     if frame_cache is None or frame_cache[0] != frame_idx:
                         frame_cache = (frame_idx, reader.get(frame_idx))
                     frame = frame_cache[1]
                     if frame is None:
-                        self.cache[(clip_id, tid, frame_idx)] = {}
+                        self.cache[key] = {}
                         continue
                     sig = signals[tid]
-                    crop = make_crop(frame, sig.mouth[k], sig.hand[k], sig.scale[k], cfg.crop_margin)
+                    crop = make_crop(frame, sig.mouth[k], sig.hand[k], sig.scale[k], margin)
                     if crop is None:
-                        self.cache[(clip_id, tid, frame_idx)] = {}
+                        self.cache[key] = {}
                         continue
                     crops.append(crop)
-                    keys.append((clip_id, tid, frame_idx))
+                    keys.append(key)
             for key, det in zip(keys, self.detect(crops, cfg)):
                 self.cache[key] = det
 
@@ -139,14 +152,20 @@ class ObjectVerifier:
             for c in track_cycles:
                 if c.valid:
                     frames = [int(sig.frame_idx[k]) for k in pick_evenly(c.hold_idx, cfg.frames_per_cycle)]
-                    self._aggregate(c, [self.cache.get((clip_id, tid, f), {}) for f in frames], cfg)
+                    dets = [merge_detections([self.cache.get((clip_id, tid, f, m), {}) for m in margins]) for f in frames]
+                    self._aggregate(c, dets, cfg)
 
     def _aggregate(self, c: Cycle, dets: List[Dict[str, float]], cfg: VerifierConfig) -> None:
         objects: Dict[str, float] = defaultdict(float)
         pos_frames = neg_frames = 0
         pos_conf = 0.0
         neg_names: Dict[str, int] = defaultdict(int)
+        strong_frames: Dict[str, int] = defaultdict(int)
+        strong = self.negative - set(cfg.weak_negative_classes)
         for det in dets:
+            for name, conf in det.items():
+                if name in strong and conf >= cfg.strong_negative_conf:
+                    strong_frames[name] += 1
             for name, conf in det.items():
                 objects[name] = max(objects[name], conf)
             p = max((v for k, v in det.items() if k in self.positive), default=0.0)
@@ -162,6 +181,14 @@ class ObjectVerifier:
         c.pos_conf = pos_conf
         c.neg_fraction = neg_frames / len(dets) if dets else 0.0
         c.direct = pos_frames >= cfg.direct_min_frames
-        if dets and c.neg_fraction >= cfg.negative_min_fraction and pos_frames == 0:
+        top = max(strong_frames, key=strong_frames.get, default="")
+        c.strong_negative = top if top and strong_frames[top] >= cfg.strong_negative_frames else ""
+        if pos_frames > 0:
+            return  # при признаке сигареты «чужие» предметы цикл не отбрасывают
+        if c.strong_negative:
+            # один предмет (банка, бутылка...) уверенно виден в нескольких кадрах — это не курение
+            c.valid = False
+            c.reject_reason = "object:" + c.strong_negative
+        elif dets and c.neg_fraction >= cfg.negative_min_fraction:
             c.valid = False
             c.reject_reason = "object:" + max(neg_names, key=neg_names.get)

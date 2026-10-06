@@ -40,6 +40,9 @@ cycle:
   lookaround: 2.0           # с до/после паузы для поиска фаз подхода и отвода
   phone_ear_ratio: 0.75     # d(кисть, ухо) / d(кисть, рот) ниже — похоже на телефон у уха
   min_wrist_above_elbow: 0.5  # доля кадров паузы, где запястье выше локтя
+  max_wrist_above_mouth: 0.1  # запястье выше рта больше чем на k*scale — рука у головы, не у рта
+  max_elbow_raise: 0.15     # локоть выше плеча больше чем на k*scale — рука у головы
+  min_face_visible: 0.5     # доля кадров паузы с уверенно найденным носом (иначе рот ненадёжен)
 
 verifier:
   enabled: true
@@ -47,12 +50,17 @@ verifier:
   fallback_model: weights/yolo11s.pt    # COCO-детектор, если open-vocab недоступен
   imgsz: 640
   conf: 0.12
-  frames_per_cycle: 4       # кропов на цикл, равномерно по паузе
+  frames_per_cycle: 6       # кадров на цикл, равномерно по паузе
   crop_margin: 0.9          # поле вокруг рта и кисти, в единицах нормировки
+  wide_crop_margin: 2.0     # второй, широкий кроп: банки и бутылки узкий обрезает; 0 — отключить
   positive_classes: [cigarette, vape, electronic cigarette, smoke, vapor cloud]
-  negative_classes: [bottle, cup, mug, drinking glass, cell phone, sandwich, food]
+  negative_classes: [bottle, water bottle, cup, mug, drinking glass, beverage can, can, jar,
+                     glass jar, thermos, cell phone, sandwich, food, spoon, fork]
+  weak_negative_classes: [cell phone]   # часто срабатывает на саму кисть: не бывает сильным негативом
   direct_min_frames: 2      # прямой признак: предмет в нескольких соседних кадрах
-  negative_min_fraction: 0.5  # доля кропов с «чужим» предметом (без позитивного), чтобы отбросить цикл
+  negative_min_fraction: 0.5  # доля кадров с «чужим» предметом (без позитивного), чтобы отбросить цикл
+  strong_negative_conf: 0.25  # сильный негатив: один предмет с такой уверенностью...
+  strong_negative_frames: 2   # ...минимум в стольких кадрах цикла отбрасывает цикл
 
 episode:
   window: 20.0              # с: два полных цикла в пределах 20 с
@@ -63,6 +71,7 @@ episode:
   evidence_weight: 0.6      # вклад прямого признака
   evidence_conf_ref: 0.4    # уверенность верификатора, считающаяся «полной»
   negative_penalty: 0.5     # штраф за «чужие» предметы
+  event_negative_fraction: 0.5  # «чужой» предмет в такой доле циклов (без прямого признака) отклоняет событие
 
 report:
   team: ""
