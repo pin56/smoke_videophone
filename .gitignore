@@ -6,6 +6,7 @@ data/
 *.mov
 *.dav
 *.h264
+*.wmv
 
 runs/
 weights/
