@@ -1,12 +1,26 @@
 # Исходные записи объекта публиковать и передавать нельзя
 data/
+videos/
 *.mp4
 *.avi
 *.mkv
 *.mov
+*.wmv
+*.asf
+*.m4v
+*.flv
+*.webm
+*.mpg
+*.mpeg
+*.m2ts
+*.vob
+*.3gp
 *.dav
 *.h264
-*.wmv
+*.264
+*.h265
+*.265
+*.hevc
 
 runs/
 weights/
@@ -16,3 +30,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+# рабочие копии агентов Claude Code
+.claude/worktrees/

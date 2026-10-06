@@ -16,7 +16,7 @@ from .cycles import Cycle
 from .episodes import Event
 from .flash import Flash
 from .geometry import TrackSignal
-from .io_video import VideoMeta
+from .io_video import FrameClock, VideoMeta
 from .roi import Roi
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ def render_video(
     thick = max(1, round(meta.height / 540))
     fscale = 0.5 * thick
     current: list = []
+    clock = FrameClock(meta.fps)
     idx = 0
     while True:
         ok, frame = cap.read()
@@ -77,7 +78,7 @@ def render_video(
             break
         if idx % stride == 0:
             current = by_frame.get(idx, [])
-        t = idx / meta.fps
+        t = clock.time(idx, cap.get(cv2.CAP_PROP_POS_MSEC))  # то же время, что у наблюдений трекера
         roi.draw(frame, thickness=thick)
         alarms = 0
         for tid, i in current:

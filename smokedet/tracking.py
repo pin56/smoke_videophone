@@ -19,7 +19,7 @@ from .io_video import VideoMeta, iter_sampled_frames
 
 log = logging.getLogger(__name__)
 
-CACHE_VERSION = 2  # 2: замер света для вспышек (flash.LightMeter)
+CACHE_VERSION = 3  # 2: замер света для вспышек (flash.LightMeter); 3: время кадра по pts (io_video.FrameClock)
 
 
 @dataclass
@@ -162,7 +162,7 @@ class PoseTracker:
         n_processed = 0
         start = time.time()
         total = meta.frame_count // stride if meta.frame_count else None
-        iterator = iter_sampled_frames(meta.path, stride)
+        iterator = iter_sampled_frames(meta.path, stride, meta.fps)
         if progress:
             try:
                 from tqdm import tqdm
@@ -171,11 +171,10 @@ class PoseTracker:
             except ImportError:
                 pass
         last_idx = -1
-        for frame_idx, frame in iterator:
+        for frame_idx, t, frame in iterator:
             res = self._track_frame(frame, first=n_processed == 0)
             n_processed += 1
             last_idx = frame_idx
-            t = frame_idx / meta.fps
             if res.boxes is None or res.boxes.id is None or len(res.boxes) == 0:
                 meter.measure(frame, t, [], [])  # фон обновляется и на кадрах без людей
                 continue
