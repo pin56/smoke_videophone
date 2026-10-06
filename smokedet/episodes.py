@@ -3,6 +3,9 @@
 Цикл «квалифицирован», если в пределах окна 20 с у того же человека есть ещё полный цикл
 (всего >= min_cycles в окне) или у самого цикла есть прямой признак (предмет/дым от верификатора,
 если flash_as_direct — вспышка зажигалки рядом по времени, если vapor_as_direct — выдох пара).
+Цикл, начавшийся сразу после конца предыдущего (зазор <= min_cycle_gap: конец отвода и начало
+подхода — один отсчёт), считается продолжением того же движения: кисть лишь качнулась от рта
+без паузы вдали. В правиле min_cycles такая пара идёт за один цикл (в debug — joined_prev).
 Квалифицированные циклы одного человека объединяются в событие при паузе <= 15 с.
 События разных людей не объединяются. Событие без прямого признака отклоняется, если «чужие»
 предметы (питьё, еда) видны в большинстве его циклов: по отдельности слабые детекции
@@ -54,6 +57,7 @@ class Event:
             "confidence": round(self.confidence, 4),
             "passed": self.passed,
             "n_cycles": len(self.cycles),
+            "n_movements": len(self.cycles) - sum(c.joined_prev for c in self.cycles[1:]),
             "direct": self.direct,
             "flash": self.flash,
             "vapor": self.vapor,
@@ -66,12 +70,25 @@ def has_evidence(c: Cycle, cfg: EpisodeConfig) -> bool:
     return c.direct or (cfg.flash_as_direct and c.flash) or (cfg.vapor_as_direct and c.vapor)
 
 
+def mark_joined(good: List[Cycle], cfg: EpisodeConfig) -> List[int]:
+    """Отмечает joined_prev у валидных циклов (по времени) и возвращает номер движения каждого цикла."""
+    movement, ids = -1, []
+    for j, c in enumerate(good):
+        c.joined_prev = j > 0 and c.start - good[j - 1].end <= cfg.min_cycle_gap
+        movement += 0 if c.joined_prev else 1
+        ids.append(movement)
+    return ids
+
+
 def qualifying_cycles(cycles: List[Cycle], cfg: EpisodeConfig) -> List[Cycle]:
+    for c in cycles:
+        c.joined_prev = False
     good = sorted((c for c in cycles if c.valid), key=lambda c: c.start)
+    movement = mark_joined(good, cfg)
     qual = [has_evidence(c, cfg) for c in good]
     for a in good:
         members = [j for j, b in enumerate(good) if b.start >= a.start and b.end <= a.start + cfg.window]
-        if len(members) >= cfg.min_cycles:
+        if len({movement[j] for j in members}) >= cfg.min_cycles:
             for j in members:
                 qual[j] = True
     return [c for c, q in zip(good, qual) if q]
@@ -100,6 +117,16 @@ def event_confidence(cycles: List[Cycle], cfg: EpisodeConfig) -> float:
     return float(np.clip(conf, 0.0, 1.0))
 
 
+def event_box(sig: TrackSignal, peak: float, cfg: EpisodeConfig) -> np.ndarray:
+    """Рамка человека в момент пика: покоординатная медиана рамок трека в ±box_window с
+    (одиночная рамка дрожит и может быть искажена перекрытием), иначе — рамка ближайшего отсчёта."""
+    if cfg.box_window > 0:
+        near = sig.valid & (np.abs(sig.t - peak) <= cfg.box_window)
+        if near.any():
+            return np.median(sig.boxes[near], axis=0)
+    return sig.boxes[sig.index_at(peak)].copy()
+
+
 def build_events(
     cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], cfg: EpisodeConfig
 ) -> List[Event]:
@@ -125,7 +152,7 @@ def build_events(
                     start=group[0].start,
                     end=max(c.end for c in group),
                     peak=best.peak,
-                    box=sig.boxes[sig.index_at(best.peak)].copy(),
+                    box=event_box(sig, best.peak, cfg),
                     confidence=conf,
                     cycles=group,
                     passed=conf >= cfg.confidence_threshold and not reason,

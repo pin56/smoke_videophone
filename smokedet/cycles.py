@@ -33,6 +33,9 @@ class Cycle:
     wrist_dy: float  # медиана за паузу; < 0 — запястье выше рта
     elbow_raise: float  # медиана за паузу; > 0 — локоть выше плеча
     face_visible: float  # доля кадров паузы, где нос найден уверенно
+    # подъём носа над ушами: медиана за паузу минус медиана до подхода, в единицах scale;
+    # > 0 — голова в паузе запрокинута (питьё), nan — нет носа/ушей в паузе или до подхода
+    head_tilt: float = float("nan")
     quality: float = 0.0
     valid: bool = True
     reject_reason: str = ""
@@ -46,6 +49,9 @@ class Cycle:
     # заполняет flash.attach_flashes: рядом по времени была вспышка зажигалки
     flash: bool = False
     flash_area: float = 0.0
+    # заполняет episodes.build_events: цикл начался сразу после конца предыдущего (episode.min_cycle_gap),
+    # это продолжение того же движения, и в правило min_cycles он отдельно не засчитывается
+    joined_prev: bool = False
     # заполняет vapor.VaporMeter: после паузы у рта появилась дымка (выдох пара или дыма)
     vapor: bool = False
     vapor_net: float = float("nan")  # чистая дымка, доля зоны; nan — не замерить (идёт, перекрыт)
@@ -71,6 +77,7 @@ class Cycle:
             "wrist_dy": None if np.isnan(self.wrist_dy) else round(self.wrist_dy, 3),
             "elbow_raise": None if np.isnan(self.elbow_raise) else round(self.elbow_raise, 3),
             "face_visible": round(self.face_visible, 3),
+            "head_tilt": None if np.isnan(self.head_tilt) else round(self.head_tilt, 3),
             "quality": round(self.quality, 3),
             "valid": self.valid,
             "reject_reason": self.reject_reason,
@@ -80,6 +87,7 @@ class Cycle:
             "neg_fraction": round(self.neg_fraction, 3),
             "strong_negative": self.strong_negative,
             "objects": {k: round(v, 3) for k, v in self.objects.items()},
+            "joined_prev": self.joined_prev,
             "flash": self.flash,
             "flash_area": round(self.flash_area, 3),
             "vapor": self.vapor,
@@ -167,6 +175,13 @@ def _make_cycle(sig: TrackSignal, cfg: CycleConfig, hs: int, he: int, exit_i: in
     face_visible = float(np.mean(sig.face_visible[idx]))
     if face_visible < cfg.min_face_visible:
         reasons.append("face_hidden")
+    # питьё: голова запрокидывается, нос в паузе поднимается над линией ушей сильнее, чем до подхода
+    head_tilt = float("nan")
+    if sig.head_pitch is not None:
+        before = [j for j in range(prev_end, start_i + 1) if t[start_i] - t[j] <= cfg.lookaround]
+        head_tilt = _nanmedian(sig.head_pitch[idx]) - _nanmedian(sig.head_pitch[np.array(before, int)])
+    if cfg.max_head_tilt > 0 and not np.isnan(head_tilt) and head_tilt > cfg.max_head_tilt:
+        reasons.append("head_tilt")
 
     cycle = Cycle(
         track_id=sig.track_id,
@@ -183,6 +198,7 @@ def _make_cycle(sig: TrackSignal, cfg: CycleConfig, hs: int, he: int, exit_i: in
         wrist_dy=wrist_dy,
         elbow_raise=elbow_raise,
         face_visible=face_visible,
+        head_tilt=head_tilt,
         quality=cycle_quality(hold, d_min, kconf, cfg),
         valid=not reasons,
         reject_reason=",".join(reasons),
