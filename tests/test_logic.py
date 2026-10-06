@@ -168,9 +168,9 @@ def test_track_object_rejects_nearby_cycles():
     assert len(cycles) == 4 and all(c.valid for c in cycles)
     cycles[0].direct = True  # палочку чупа-чупса в паузе приняли за сигарету
     cfg = VerifierConfig()
-    reject_by_track_objects(cycles, [(40.0, "lollipop"), (41.0, "lollipop")], cfg)
+    reject_by_track_objects(cycles, [(40.0, "lollipop"), (41.0, "lollipop")], cfg.track_negative_frames, cfg.track_negative_window)
     assert all(c.valid for c in cycles)  # находок меньше track_negative_frames — циклы остаются
-    reject_by_track_objects(cycles, [(40.0, "lollipop"), (41.0, "lollipop"), (60.0, "lollipop")], cfg)
+    reject_by_track_objects(cycles, [(40.0, "lollipop"), (41.0, "lollipop"), (60.0, "lollipop")], cfg.track_negative_frames, cfg.track_negative_window)
     assert [c.valid for c in cycles] == [False, False, True, True]  # дальние циклы вне окна 60 с
     assert cycles[0].reject_reason == "track_object:lollipop" and not cycles[0].direct
     events = build_events({1: cycles}, {1: sig}, EpisodeConfig())
