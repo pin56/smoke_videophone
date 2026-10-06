@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -123,18 +124,30 @@ def peak_pair(t: Sequence[float], net: Sequence[float], ok: Sequence[bool]) -> T
     return float(best), float(best_t)
 
 
+def signals_digest(signals: Dict[int, TrackSignal]) -> str:
+    """Отпечаток всего, что замер берёт из сигналов: рот, лицо, кисть, нормировка, рамки, кадры, годность."""
+    h = hashlib.sha1()
+    for tid in sorted(signals):
+        sig = signals[tid]
+        h.update(str(tid).encode())
+        for arr in (sig.frame_idx, sig.t, sig.mouth, sig.face, sig.hand, sig.scale, sig.boxes, sig.valid):
+            h.update(np.ascontiguousarray(arr).tobytes())
+    return h.hexdigest()
+
+
 class VaporMeter:
-    """Замер выдоха для валидных циклов клипа. Результат кэшируется в памяти по циклу и параметрам
-    замера: tune.py перебирает пороги без повторного чтения видео."""
+    """Замер выдоха для валидных циклов клипа. Результат кэшируется в памяти по циклу, параметрам
+    замера и отпечатку сигналов клипа (рот, кисть, нормировка и рамки зависят от секций geometry и
+    tracking): tune.py перебирает пороги без повторного чтения видео и без устаревших замеров."""
 
     def __init__(self) -> None:
         self.cache: Dict[tuple, Tuple[float, float]] = {}
 
     @staticmethod
-    def _key(clip_id: str, c: Cycle, cfg: VaporConfig) -> tuple:
+    def _key(clip_id: str, c: Cycle, cfg: VaporConfig, digest: str = "") -> tuple:
         params = (cfg.zone_radius, cfg.head_radius, cfg.hand_radius, cfg.body_offset, cfg.min_rise, cfg.bg_before,
                   cfg.bg_gap, cfg.bg_min_frames, cfg.window_before, cfg.window_after, cfg.min_kept, cfg.max_shift)  # fmt: skip
-        return clip_id, c.track_id, round(c.start, 3), round(c.hold_end, 3), params
+        return clip_id, digest, c.track_id, round(c.start, 3), round(c.hold_end, 3), params
 
     def measure(
         self,
@@ -145,7 +158,8 @@ class VaporMeter:
         cfg: VaporConfig,
     ) -> None:
         """Заполняет у валидных циклов поля vapor / vapor_net / vapor_t."""
-        todo = [c for cs in cycles.values() for c in cs if c.valid and self._key(clip_id, c, cfg) not in self.cache]
+        digest = signals_digest(signals)
+        todo = [c for cs in cycles.values() for c in cs if c.valid and self._key(clip_id, c, cfg, digest) not in self.cache]
         if todo:
             others = defaultdict(list)  # frame_idx -> [(track_id, рамка)]
             for tid, sig in signals.items():
@@ -153,11 +167,11 @@ class VaporMeter:
                     others[int(f)].append((tid, b))
             with FrameReader(video_path) as reader:
                 for c in sorted(todo, key=lambda c: c.start):
-                    self.cache[self._key(clip_id, c, cfg)] = self._measure_cycle(reader, signals[c.track_id], c, others, cfg)
+                    self.cache[self._key(clip_id, c, cfg, digest)] = self._measure_cycle(reader, signals[c.track_id], c, others, cfg)
         for cs in cycles.values():
             for c in cs:
                 if c.valid:
-                    c.vapor_net, c.vapor_t = self.cache[self._key(clip_id, c, cfg)]
+                    c.vapor_net, c.vapor_t = self.cache[self._key(clip_id, c, cfg, digest)]
                     c.vapor = bool(c.vapor_net >= cfg.min_net)
 
     @staticmethod

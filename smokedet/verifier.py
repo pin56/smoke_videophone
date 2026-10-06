@@ -6,15 +6,23 @@
 обрезает. Если open-vocab модель недоступна (нет CLIP / весов), используется COCO-детектор
 только с негативными классами.
 
-«Двойники» сигареты (чупа-чупс) ищутся по всему треку, а не только в паузах: в паузе детектор
-принимает палочку за сигарету, а сама конфета хорошо видна, когда её держат в руке или у рта
-между циклами.
+«Двойники» сигареты (чупа-чупс) и предметы для питья (бутылка, кружка, банка) ищутся по всему
+треку, а не только в паузах: в паузе детектор принимает палочку за сигарету, а конфету или кружку
+хорошо видно, когда их держат в руке или у рта между циклами.
+
+Детекции кэшируются в памяти по рамке кропа, imgsz и словарю и хранятся с нижним порогом
+уверенности: tune.py перебирает conf, геометрию и списки классов без устаревших результатов.
+Словарь open-vocab модели «запекается» в weights/<модель>-vocab-<хэш>.pt: такой файл грузится
+без текстового энкодера CLIP, поэтому прогон на площадке не требует интернета.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -29,22 +37,36 @@ COCO_NEGATIVE = {
     "bottle", "cup", "wine glass", "cell phone", "sandwich", "banana", "apple",
     "donut", "pizza", "hot dog", "fork", "spoon", "knife",
 }  # fmt: skip
+PREDICT_CONF = 0.05  # модель запускается с этим порогом, cfg.conf применяется при агрегации
+
+# детекция в координатах кадра: (класс, уверенность, центр x, центр y)
+Det = Tuple[str, float, float, float]
 
 
-def crop_box(shape, mouth: np.ndarray, hand: np.ndarray, scale: float, margin: float):
-    """Квадрат вокруг рта и кисти с полем margin * scale: (x1, y1, x2, y2) или None."""
+def raw_box(mouth: np.ndarray, hand: np.ndarray, scale: float, margin: float) -> Optional[Tuple[int, int, int, int]]:
+    """Квадрат вокруг рта и кисти с полем margin * scale без обрезки по кадру — он же ключ кэша."""
     pts = [p for p in (mouth, hand) if p is not None and not np.isnan(p).any()]
     if not pts or np.isnan(scale):
         return None
     center = np.mean(pts, axis=0)
     span = np.linalg.norm(pts[0] - pts[-1]) / 2
     half = max(span + margin * scale, 12.0)
+    return int(center[0] - half), int(center[1] - half), int(center[0] + half), int(center[1] + half)
+
+
+def clip_box(shape, box: Optional[Tuple[int, int, int, int]]):
+    if box is None:
+        return None
     h, w = shape[:2]
-    x1, y1 = int(max(0, center[0] - half)), int(max(0, center[1] - half))
-    x2, y2 = int(min(w, center[0] + half)), int(min(h, center[1] + half))
+    x1, y1, x2, y2 = max(0, box[0]), max(0, box[1]), min(w, box[2]), min(h, box[3])
     if x2 - x1 < 8 or y2 - y1 < 8:
         return None
     return x1, y1, x2, y2
+
+
+def crop_box(shape, mouth: np.ndarray, hand: np.ndarray, scale: float, margin: float):
+    """Квадрат вокруг рта и кисти с полем margin * scale в пределах кадра: (x1, y1, x2, y2) или None."""
+    return clip_box(shape, raw_box(mouth, hand, scale, margin))
 
 
 def make_crop(frame: np.ndarray, mouth: np.ndarray, hand: np.ndarray, scale: float, margin: float):
@@ -53,6 +75,14 @@ def make_crop(frame: np.ndarray, mouth: np.ndarray, hand: np.ndarray, scale: flo
         return None
     x1, y1, x2, y2 = box
     return frame[y1:y2, x1:x2].copy()
+
+
+def best_by_class(dets: List[Det], min_conf: float) -> Dict[str, float]:
+    best: Dict[str, float] = {}
+    for name, conf, _, _ in dets:
+        if conf >= min_conf:
+            best[name] = max(best.get(name, 0.0), conf)
+    return best
 
 
 def merge_detections(dets: List[Dict[str, float]]) -> Dict[str, float]:
@@ -82,81 +112,165 @@ def scan_indices(sig: TrackSignal, step: float) -> List[int]:
     return out
 
 
-def reject_by_track_objects(cycles: List[Cycle], hits: List[Tuple[float, str]], cfg: VerifierConfig) -> None:
+def vocabulary(cfg: VerifierConfig) -> List[str]:
+    return list(dict.fromkeys([*cfg.positive_classes, *cfg.negative_classes, *cfg.track_negative_classes,
+                               *cfg.track_drink_classes]))  # fmt: skip
+
+
+def baked_path(model_path: str, classes: List[str]) -> Path:
+    """Файл open-vocab модели с заданным словарём: грузится без CLIP."""
+    digest = hashlib.sha256("\n".join(classes).encode("utf-8")).hexdigest()[:8]
+    p = Path(model_path)
+    return p.with_name(f"{p.stem}-vocab-{digest}{p.suffix}")
+
+
+@dataclass
+class TrackGroup:
+    """Группа классов для поиска по треку и её пороги."""
+
+    name: str
+    classes: frozenset
+    conf: float
+    radius: float
+    frames: int
+    window: float
+
+
+def track_groups(cfg: VerifierConfig, available: set) -> List[TrackGroup]:
+    groups = [
+        TrackGroup("lookalike", frozenset(cfg.track_negative_classes) & available, cfg.track_negative_conf,
+                   cfg.track_negative_radius, cfg.track_negative_frames, cfg.track_negative_window),
+        TrackGroup("drink", frozenset(cfg.track_drink_classes) & available, cfg.track_drink_conf,
+                   cfg.track_drink_radius, cfg.track_drink_frames, cfg.track_drink_window),
+    ]  # fmt: skip
+    return [g for g in groups if g.classes and g.frames > 0]
+
+
+def reject_by_track_objects(cycles: List[Cycle], hits: List[Tuple[float, str]], frames: int, window: float) -> None:
     """Отбрасывает валидные циклы, рядом с которыми (± окно) у того же человека уверенно найден
-    «двойник» сигареты. hits — (время, класс) кадров с находкой."""
+    «двойник» сигареты или предмет для питья. hits — (время, класс) кадров с находкой."""
     for c in cycles:
         if not c.valid:
             continue
-        near = [name for t, name in hits if cfg.track_negative_window <= 0 or abs(t - c.peak) <= cfg.track_negative_window]
-        if len(near) >= cfg.track_negative_frames:
+        near = [name for t, name in hits if window <= 0 or abs(t - c.peak) <= window]
+        if len(near) >= frames:
             c.valid = False
-            c.direct = False  # «сигарета» в паузе — это палочка конфеты
+            c.direct = False  # «сигарета» в паузе — это палочка конфеты или край кружки
             c.reject_reason = "track_object:" + max(set(near), key=near.count)
 
 
 class ObjectVerifier:
-    def __init__(self, cfg: VerifierConfig, device: str):
-        from ultralytics import YOLO
+    def __init__(self, cfg: VerifierConfig, device: str, factory: Optional[Callable] = None):
+        if factory is None:
+            from ultralytics import YOLO
 
+            factory = YOLO
+        self.factory = factory
         self.device = device
-        self.mode = "open_vocab"
-        self.weights = cfg.model
-        classes = list(dict.fromkeys([*cfg.positive_classes, *cfg.negative_classes, *cfg.track_negative_classes]))
+        # пути здесь уже от корня проекта; в verify() приходит конфиг tune.py с относительными путями
+        self.model_path = cfg.model
+        self.fallback_path = cfg.fallback_model
+        self._load(cfg)
+        # детекции кропа по (clip_id, frame_idx, рамка кропа, imgsz, словарь, порог предсказания)
+        self.cache: Dict[tuple, List[Det]] = {}
+
+    def _load(self, cfg: VerifierConfig) -> None:
+        classes = vocabulary(cfg)
+        baked = baked_path(self.model_path, classes)
+        self.base_weights = self.model_path
         try:
-            model = YOLO(cfg.model)
-            model.set_classes(classes)
+            if baked.is_file():
+                model = self.factory(str(baked))
+                if list(_names(model).values()) != classes:
+                    raise RuntimeError(f"словарь в {baked} не совпадает с конфигом")
+                self.weights, self.clip_used = str(baked), False
+            else:
+                model = self.factory(self.model_path)
+                model.set_classes(classes)
+                self.weights, self.clip_used = self.model_path, True
+                _bake(model, baked)
+            self.mode = "open_vocab"
             self.positive = set(cfg.positive_classes)
             self.negative = set(cfg.negative_classes)
-            self.track_negative = set(cfg.track_negative_classes)
         except Exception as e:  # нет CLIP/сети/весов — работаем без позитивных классов
-            log.warning("Open-vocab верификатор недоступен (%s); переключаюсь на %s", e, cfg.fallback_model)
-            model = YOLO(cfg.fallback_model)
+            log.warning("Open-vocab верификатор недоступен (%s); переключаюсь на %s", e, self.fallback_path)
+            model = self.factory(self.fallback_path)
             self.mode = "coco"
-            self.weights = cfg.fallback_model
+            self.weights = self.base_weights = self.fallback_path
+            self.clip_used = False
             self.positive = set()
             self.negative = COCO_NEGATIVE
-            self.track_negative = set()
         self.model = model
-        names = model.names
-        self.names = names if isinstance(names, dict) else dict(enumerate(names))
-        # кэш детекций по (clip_id, track_id, frame_idx, поле кропа): tune.py не перечитывает видео
-        self.cache: Dict[Tuple[str, int, int, float], Dict[str, float]] = {}
-        # то же для поиска по треку: (класс, уверенность, расстояние до кисти или рта в единицах нормировки)
-        self.scan_cache: Dict[Tuple[str, int, int, float], List[Tuple[str, float, float]]] = {}
+        self.names = _names(model)
+        self.vocab = tuple(classes) if self.mode == "open_vocab" else ("coco",)
+
+    def _ensure_vocab(self, cfg: VerifierConfig) -> None:
+        """Сетка tune.py может менять списки классов: тогда словарь модели задаётся заново."""
+        if self.mode == "open_vocab" and tuple(vocabulary(cfg)) != self.vocab:
+            log.info("Списки классов верификатора изменились — обновляю словарь модели")
+            self._load(cfg)
 
     def describe(self) -> dict:
+        track = [c for c in self.vocab if c not in self.positive | self.negative] if self.mode == "open_vocab" else []
         return {
             "weights": self.weights,
+            "base_weights": self.base_weights,
             "mode": self.mode,
+            "clip_used": self.clip_used,
             "positive_classes": sorted(self.positive),
             "negative_classes": sorted(self.negative),
-            "track_negative_classes": sorted(self.track_negative),
+            "track_negative_classes": sorted(track),
         }
 
-    def predict(self, crops: List[np.ndarray], cfg: VerifierConfig, batch: int = 16):
+    def predict(self, crops: List[np.ndarray], imgsz: int, conf: float, batch: int = 16):
         """Для каждого кропа — список (класс, уверенность, xyxy в координатах кропа)."""
         out: List[List[Tuple[str, float, np.ndarray]]] = []
         for i in range(0, len(crops), batch):
-            results = self.model.predict(
-                crops[i : i + batch], imgsz=cfg.imgsz, conf=cfg.conf, device=self.device, verbose=False
-            )
+            results = self.model.predict(crops[i : i + batch], imgsz=imgsz, conf=conf, device=self.device, verbose=False)
             for r in results:
                 dets = []
-                if r.boxes is not None:
-                    for cls, conf, xyxy in zip(r.boxes.cls.int().tolist(), r.boxes.conf.tolist(), r.boxes.xyxy.cpu().numpy()):
-                        dets.append((self.names[cls], float(conf), xyxy))
+                if r.boxes is not None and len(r.boxes):
+                    cls = r.boxes.cls.cpu().numpy().astype(int)
+                    confs = r.boxes.conf.cpu().numpy()
+                    for c, cf, xyxy in zip(cls, confs, r.boxes.xyxy.cpu().numpy()):
+                        dets.append((self.names[int(c)], float(cf), xyxy))
                 out.append(dets)
         return out
 
-    def detect(self, crops: List[np.ndarray], cfg: VerifierConfig, batch: int = 16) -> List[Dict[str, float]]:
-        out: List[Dict[str, float]] = []
-        for dets in self.predict(crops, cfg, batch):
-            best: Dict[str, float] = {}
-            for name, conf, _ in dets:
-                best[name] = max(best.get(name, 0.0), conf)
-            out.append(best)
-        return out
+    def _detections(
+        self, clip_id: str, video_path: str, signals: Dict[int, TrackSignal], requests, cfg: VerifierConfig
+    ) -> Dict[tuple, List[Det]]:
+        """requests — (track_id, sample_idx, margin). Детекции по каждому запросу; недостающие досчитываются."""
+        pconf = min(PREDICT_CONF, cfg.conf)
+        keyed = {}
+        for tid, k, m in requests:
+            sig = signals[tid]
+            f = int(sig.frame_idx[k])
+            box = raw_box(sig.mouth[k], sig.hand[k], sig.scale[k], m)
+            keyed[(tid, k, m)] = (f, box, (clip_id, f, box, cfg.imgsz, self.vocab, pconf))
+        todo = sorted({v for v in keyed.values() if v[2] not in self.cache}, key=lambda v: (v[0], str(v[1])))
+        if todo:
+            crops, keys, offsets = [], [], []
+            with FrameReader(video_path) as reader:
+                frame_cache: Optional[Tuple[int, np.ndarray]] = None
+                for frame_idx, box, key in todo:
+                    if frame_cache is None or frame_cache[0] != frame_idx:
+                        frame_cache = (frame_idx, reader.get(frame_idx))
+                    frame = frame_cache[1]
+                    clipped = None if frame is None else clip_box(frame.shape, box)
+                    if clipped is None:
+                        self.cache[key] = []
+                        continue
+                    x1, y1, x2, y2 = clipped
+                    crops.append(frame[y1:y2, x1:x2].copy())
+                    keys.append(key)
+                    offsets.append((x1, y1))
+            for key, (ox, oy), dets in zip(keys, offsets, self.predict(crops, cfg.imgsz, pconf)):
+                self.cache[key] = [
+                    (name, conf, float((xyxy[0] + xyxy[2]) / 2 + ox), float((xyxy[1] + xyxy[3]) / 2 + oy))
+                    for name, conf, xyxy in dets
+                ]
+        return {req: self.cache[v[2]] for req, v in keyed.items()}
 
     def verify(
         self,
@@ -167,47 +281,21 @@ class ObjectVerifier:
         cfg: VerifierConfig,
     ) -> None:
         """Заполняет у валидных циклов поля direct / pos_* / neg_fraction / strong_negative / objects,
-        затем отбрасывает циклы людей, у которых по треку найден «двойник» сигареты."""
+        затем отбрасывает циклы людей, у которых по треку найден «двойник» сигареты или предмет для питья."""
+        self._ensure_vocab(cfg)
         margins = [cfg.crop_margin] + ([cfg.wide_crop_margin] if cfg.wide_crop_margin > 0 else [])
-        requests = []  # (frame_idx, track_id, sample_idx, margin)
-        for tid, track_cycles in cycles.items():
-            sig = signals[tid]
-            for c in track_cycles:
-                if c.valid:
-                    for k in pick_evenly(c.hold_idx, cfg.frames_per_cycle):
-                        requests.extend((int(sig.frame_idx[k]), tid, k, m) for m in margins)
-        todo = sorted({r for r in requests if (clip_id, r[1], r[0], r[3]) not in self.cache})
-        if todo:
-            crops, keys = [], []
-            with FrameReader(video_path) as reader:
-                frame_cache: Optional[Tuple[int, np.ndarray]] = None
-                for frame_idx, tid, k, margin in todo:
-                    key = (clip_id, tid, frame_idx, margin)
-                    if frame_cache is None or frame_cache[0] != frame_idx:
-                        frame_cache = (frame_idx, reader.get(frame_idx))
-                    frame = frame_cache[1]
-                    if frame is None:
-                        self.cache[key] = {}
-                        continue
-                    sig = signals[tid]
-                    crop = make_crop(frame, sig.mouth[k], sig.hand[k], sig.scale[k], margin)
-                    if crop is None:
-                        self.cache[key] = {}
-                        continue
-                    crops.append(crop)
-                    keys.append(key)
-            for key, det in zip(keys, self.detect(crops, cfg)):
-                self.cache[key] = det
-
-        for tid, track_cycles in cycles.items():
-            sig = signals[tid]
-            for c in track_cycles:
-                if c.valid:
-                    frames = [int(sig.frame_idx[k]) for k in pick_evenly(c.hold_idx, cfg.frames_per_cycle)]
-                    dets = [merge_detections([self.cache.get((clip_id, tid, f, m), {}) for m in margins]) for f in frames]
-                    self._aggregate(c, dets, cfg)
-        if self.track_negative and cfg.track_scan_step > 0:
-            self._scan_tracks(clip_id, video_path, cycles, signals, cfg, margins)
+        plan = [
+            (tid, c, pick_evenly(c.hold_idx, cfg.frames_per_cycle))
+            for tid, track_cycles in cycles.items() for c in track_cycles if c.valid
+        ]  # fmt: skip
+        requests = {(tid, k, m) for tid, _, ks in plan for k in ks for m in margins}
+        dets = self._detections(clip_id, video_path, signals, requests, cfg)
+        for tid, c, ks in plan:
+            frames = [merge_detections([best_by_class(dets[(tid, k, m)], cfg.conf) for m in margins]) for k in ks]
+            self._aggregate(c, frames, cfg)
+        groups = track_groups(cfg, set(self.names.values()))
+        if groups and cfg.track_scan_step > 0:
+            self._scan_tracks(clip_id, video_path, cycles, signals, cfg, margins, groups)
 
     def _scan_tracks(
         self,
@@ -217,57 +305,32 @@ class ObjectVerifier:
         signals: Dict[int, TrackSignal],
         cfg: VerifierConfig,
         margins: List[float],
+        groups: List[TrackGroup],
     ) -> None:
-        """Ищет «двойников» сигареты у кисти или рта по всему треку (только у людей с валидными циклами)."""
+        """Ищет «двойников» сигареты и предметы для питья у кисти или рта по всему треку
+        (только у людей с валидными циклами)."""
         plan = {tid: scan_indices(signals[tid], cfg.track_scan_step) for tid, cs in cycles.items() if any(c.valid for c in cs)}
-        requests = [(int(signals[tid].frame_idx[k]), tid, k, m) for tid, ks in plan.items() for k in ks for m in margins]
-        todo = sorted(r for r in requests if (clip_id, r[1], r[0], r[3]) not in self.scan_cache)
-        if todo:
-            crops, keys, metas = [], [], []
-            with FrameReader(video_path) as reader:
-                frame_cache: Optional[Tuple[int, np.ndarray]] = None
-                for frame_idx, tid, k, margin in todo:
-                    key = (clip_id, tid, frame_idx, margin)
-                    if frame_cache is None or frame_cache[0] != frame_idx:
-                        frame_cache = (frame_idx, reader.get(frame_idx))
-                    frame = frame_cache[1]
-                    sig = signals[tid]
-                    box = None if frame is None else crop_box(frame.shape, sig.mouth[k], sig.hand[k], sig.scale[k], margin)
-                    if box is None:
-                        self.scan_cache[key] = []
-                        continue
-                    x1, y1, x2, y2 = box
-                    crops.append(frame[y1:y2, x1:x2].copy())
-                    keys.append(key)
-                    metas.append((tid, k, np.array([x1, y1], dtype=float)))
-            for key, (tid, k, offset), dets in zip(keys, metas, self.predict(crops, cfg)):
-                sig = signals[tid]
-                anchors = [p for p in (sig.mouth[k], sig.hand[k]) if not np.isnan(p).any()]
-                found = []
-                for name, conf, xyxy in dets:
-                    if name in self.track_negative:
-                        center = (xyxy[:2] + xyxy[2:]) / 2 + offset
-                        dist = min(float(np.linalg.norm(center - p)) for p in anchors) / sig.scale[k]
-                        found.append((name, conf, dist))
-                self.scan_cache[key] = found
-
+        requests = {(tid, k, m) for tid, ks in plan.items() for k in ks for m in margins}
+        dets = self._detections(clip_id, video_path, signals, requests, cfg)
         for tid, ks in plan.items():
             sig = signals[tid]
-            hits: List[Tuple[float, str]] = []
-            for k in ks:
-                f = int(sig.frame_idx[k])
-                names = [
-                    name
-                    for m in margins
-                    for name, conf, dist in self.scan_cache.get((clip_id, tid, f, m), [])
-                    if conf >= cfg.track_negative_conf and dist <= cfg.track_negative_radius
-                ]
-                if names:
-                    hits.append((float(sig.t[k]), max(set(names), key=names.count)))
-            if len(hits) >= cfg.track_negative_frames:
-                log.info("[%s] трек %d: %s у кисти или рта в %d кадрах (%.1f–%.1f с)", clip_id, tid,
-                         hits[0][1], len(hits), hits[0][0], hits[-1][0])  # fmt: skip
-            reject_by_track_objects(cycles[tid], hits, cfg)
+            for g in groups:
+                hits: List[Tuple[float, str]] = []
+                for k in ks:
+                    anchors = [p for p in (sig.mouth[k], sig.hand[k]) if not np.isnan(p).any()]
+                    names = [
+                        name
+                        for m in margins
+                        for name, conf, cx, cy in dets[(tid, k, m)]
+                        if name in g.classes and conf >= g.conf
+                        and min(np.hypot(cx - p[0], cy - p[1]) for p in anchors) / sig.scale[k] <= g.radius
+                    ]  # fmt: skip
+                    if names:
+                        hits.append((float(sig.t[k]), max(set(names), key=names.count)))
+                if len(hits) >= g.frames:
+                    log.info("[%s] трек %d: %s у кисти или рта в %d кадрах (%.1f–%.1f с)", clip_id, tid,
+                             hits[0][1], len(hits), hits[0][0], hits[-1][0])  # fmt: skip
+                reject_by_track_objects(cycles[tid], hits, g.frames, g.window)
 
     def _aggregate(self, c: Cycle, dets: List[Dict[str, float]], cfg: VerifierConfig) -> None:
         objects: Dict[str, float] = defaultdict(float)
@@ -306,3 +369,24 @@ class ObjectVerifier:
         elif dets and c.neg_fraction >= cfg.negative_min_fraction:
             c.valid = False
             c.reject_reason = "object:" + max(neg_names, key=neg_names.get)
+
+
+def _bake(model, path: Path) -> None:
+    """Сохраняет модель с заданным словарём. Кэшированный в модели CLIP (≈300 МБ) в файл не пишется."""
+    inner = getattr(model, "model", None)
+    clip = getattr(inner, "clip_model", None)
+    try:
+        if clip is not None:
+            inner.clip_model = None
+        model.save(str(path))
+        log.info("Словарь верификатора сохранён в %s: дальше CLIP не нужен", path)
+    except Exception as e:
+        log.warning("Не удалось сохранить словарь в %s: %s", path, e)
+    finally:
+        if clip is not None:
+            inner.clip_model = clip
+
+
+def _names(model) -> Dict[int, str]:
+    names = model.names
+    return names if isinstance(names, dict) else dict(enumerate(names))

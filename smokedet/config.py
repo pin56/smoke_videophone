@@ -98,6 +98,14 @@ class VerifierConfig:
     track_negative_radius: float = 1.0  # центр предмета не дальше от кисти или рта, в единицах нормировки
     track_negative_frames: int = 3  # столько кадров с находкой в окне вокруг цикла отбрасывают цикл
     track_negative_window: float = 60.0  # с, окно вокруг пика цикла; 0 — весь трек
+    # предметы для питья у кисти или рта по всему треку (тот же проход, что и для «двойников», свои пороги)
+    track_drink_classes: List[str] = field(
+        default_factory=lambda: ["bottle", "water bottle", "cup", "mug", "beverage can", "drinking glass"]
+    )
+    track_drink_conf: float = 0.6  # на true/false не разделяет (true_9 даёт больше находок, чем false_8): подбирать на эталоне
+    track_drink_radius: float = 1.0
+    track_drink_frames: int = 3  # 0 — отключить
+    track_drink_window: float = 60.0
 
 
 @dataclass
