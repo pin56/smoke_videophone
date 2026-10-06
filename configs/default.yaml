@@ -1,0 +1,75 @@
+# Все параметры пайплайна; целиком попадают в manifest.json.
+# Переопределение из CLI: --set section.key=value  (например --set episode.confidence_threshold=0.6)
+
+video:
+  target_fps: 10.0          # частота анализа, остальные кадры пропускаются
+  fallback_fps: 25.0        # если в контейнере нет корректного FPS
+
+detector:
+  pose_model: weights/yolo11m-pose.pt   # скачивается автоматически; точнее — yolo11x-pose.pt
+  imgsz: 1280               # CCTV: люди мелкие, поэтому вход больше стандартных 640
+  conf: 0.1                 # низкий порог: ByteTrack использует слабые детекции во втором проходе
+  iou: 0.6
+  tracker: configs/bytetrack_cctv.yaml
+  device: auto              # auto | cpu | mps | 0
+  half: false               # true только для CUDA
+  refine_small: true        # повторная поза на увеличенном кропе для мелких людей
+  refine_max_height: 220    # px, ниже — уточняем
+  refine_imgsz: 320
+  refine_pad: 0.15
+
+tracking:
+  min_person_height: 72     # по правилам 80px; запас вниз почти не штрафуется (такие интервалы — IGNORE)
+  roi_anchor: feet          # feet | center | head — точка человека, которая должна быть в зоне
+  stitch_max_gap: 2.0       # с, склейка оборванных треков
+  stitch_max_dist: 0.6      # расстояние центров, в высотах bbox
+
+geometry:
+  min_kpt_conf: 0.3
+  hand_extrapolation: 0.3   # кисть = запястье + k * (запястье - локоть)
+  scale_bbox_ratio: 0.12    # нормировка = max(ширина плеч, k * высота bbox)
+  scale_window: 2.0         # с, скользящая медиана нормировки
+  smooth_window: 3          # отсчётов, медианное сглаживание d(t)
+
+cycle:
+  near_enter: 0.6           # d ниже — кисть у рта (d в единицах нормировки)
+  near_exit: 0.9            # d выше — кисть отведена (гистерезис)
+  min_hold: 0.4             # с; по правилам ~0.5 с, с допуском на дискретизацию
+  max_hold: 6.0             # с; по правилам ~5 с
+  max_missing: 0.6          # с пропуска точек, допустимые внутри паузы
+  lookaround: 2.0           # с до/после паузы для поиска фаз подхода и отвода
+  phone_ear_ratio: 0.75     # d(кисть, ухо) / d(кисть, рот) ниже — похоже на телефон у уха
+  min_wrist_above_elbow: 0.5  # доля кадров паузы, где запястье выше локтя
+
+verifier:
+  enabled: true
+  model: weights/yolov8s-worldv2.pt     # open-vocabulary (YOLO-World / YOLOE)
+  fallback_model: weights/yolo11s.pt    # COCO-детектор, если open-vocab недоступен
+  imgsz: 640
+  conf: 0.12
+  frames_per_cycle: 4       # кропов на цикл, равномерно по паузе
+  crop_margin: 0.9          # поле вокруг рта и кисти, в единицах нормировки
+  positive_classes: [cigarette, vape, electronic cigarette, smoke, vapor cloud]
+  negative_classes: [bottle, cup, mug, drinking glass, cell phone, sandwich, food]
+  direct_min_frames: 2      # прямой признак: предмет в нескольких соседних кадрах
+  negative_min_fraction: 0.5  # доля кропов с «чужим» предметом (без позитивного), чтобы отбросить цикл
+
+episode:
+  window: 20.0              # с: два полных цикла в пределах 20 с
+  min_cycles: 2
+  merge_gap: 15.0           # с: циклы одного человека объединяются при паузе <= 15 с
+  confidence_threshold: 0.5 # подбирается на эталонном наборе (tune.py) и фиксируется до раскрытия разметки
+  cycle_weight: 0.45        # вклад одного идеального цикла в confidence
+  evidence_weight: 0.6      # вклад прямого признака
+  evidence_conf_ref: 0.4    # уверенность верификатора, считающаяся «полной»
+  negative_penalty: 0.5     # штраф за «чужие» предметы
+
+report:
+  team: ""
+  model_version: smokedet-0.1.0
+  data_sources:
+    - COCO (предобучение YOLO11-pose, Ultralytics)
+    - Objects365/GoldG (предобучение YOLO-World, Ultralytics)
+    - Эталонный набор организатора — только подбор порогов
+  fine_tuning: "нет: используются предобученные веса, на данных объекта подбираются только пороги"
+  notes: ""

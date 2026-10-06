@@ -1,0 +1,17 @@
+# Исходные записи объекта публиковать и передавать нельзя
+data/
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.dav
+*.h264
+
+runs/
+weights/
+*.pt
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
