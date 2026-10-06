@@ -37,6 +37,9 @@ class TrackSignal:
     ear_ratio: np.ndarray  # (N,) d(кисть, ухо) / d(кисть, рот)
     wrist_above: np.ndarray  # (N,) 1 — запястье выше локтя, 0 — ниже, nan — нет точек
     kconf: np.ndarray  # (N,) min(уверенность лица, уверенность запястья)
+    wrist_dy: np.ndarray  # (N,) (y запястья - y рта) / scale: > 0 — запястье ниже рта
+    elbow_raise: np.ndarray  # (N,) (y плеча - y локтя) / scale: > 0 — локоть выше плеча
+    face_visible: np.ndarray  # (N,) 1 — нос найден уверенно, 0 — рот оценён по глазам/ушам
 
     def __len__(self) -> int:
         return len(self.t)
@@ -102,10 +105,11 @@ def estimate_mouth(k: np.ndarray, scale: float, thr: float) -> Tuple[Optional[np
 
 
 def nearest_hand(k: np.ndarray, mouth: np.ndarray, scale: float, cfg: GeometryConfig):
-    """Возвращает (кисть, расстояние до рта в единицах scale, ear_ratio, wrist_above, conf запястья)."""
+    """Возвращает (кисть, расстояние до рта в единицах scale, ear_ratio, wrist_above, conf запястья,
+    wrist_dy, elbow_raise) для руки, ближайшей ко рту."""
     thr = cfg.min_kpt_conf
     best = None
-    for wri, elb in ((L_WRI, L_ELB), (R_WRI, R_ELB)):
+    for wri, elb, sho in ((L_WRI, L_ELB, L_SHO), (R_WRI, R_ELB, R_SHO)):
         w = _pt(k, wri, thr)
         if w is None:
             continue
@@ -114,17 +118,20 @@ def nearest_hand(k: np.ndarray, mouth: np.ndarray, scale: float, cfg: GeometryCo
         dist = min(np.linalg.norm(hand - mouth), np.linalg.norm(w - mouth)) / scale
         if best is None or dist < best[1]:
             above = float(w[1] < e[1]) if e is not None else np.nan
-            best = (hand, dist, w, above, float(k[wri, 2]))
+            s = _pt(k, sho, thr)
+            raise_ = float((s[1] - e[1]) / scale) if e is not None and s is not None else np.nan
+            best = (hand, dist, w, above, float(k[wri, 2]), raise_)
     if best is None:
         return None
-    hand, dist, w, above, conf = best
+    hand, dist, w, above, conf, elbow_raise = best
+    wrist_dy = float((w[1] - mouth[1]) / scale)
     ears = [p for p in (_pt(k, L_EAR, thr), _pt(k, R_EAR, thr)) if p is not None]
     if ears:
         d_ear = min(min(np.linalg.norm(hand - p), np.linalg.norm(w - p)) for p in ears) / scale
         ear_ratio = d_ear / max(dist, 1e-3)
     else:
         ear_ratio = np.nan
-    return hand, float(dist), float(ear_ratio), above, conf
+    return hand, float(dist), float(ear_ratio), above, conf, wrist_dy, elbow_raise
 
 
 def build_signal(
@@ -152,6 +159,9 @@ def build_signal(
     ear_ratio = np.full(n, np.nan)
     wrist_above = np.full(n, np.nan)
     kconf = np.zeros(n)
+    wrist_dy = np.full(n, np.nan)
+    elbow_raise = np.full(n, np.nan)
+    face_visible = np.array([float(o.kpts[NOSE, 2] >= geo.min_kpt_conf) for o in obs])
     for i, o in enumerate(obs):
         m, face_conf = estimate_mouth(o.kpts, scale[i], geo.min_kpt_conf)
         if m is None:
@@ -160,7 +170,7 @@ def build_signal(
         res = nearest_hand(o.kpts, m, scale[i], geo)
         if res is None:
             continue
-        hand[i], d_raw[i], ear_ratio[i], wrist_above[i], wconf = res
+        hand[i], d_raw[i], ear_ratio[i], wrist_above[i], wconf, wrist_dy[i], elbow_raise[i] = res
         kconf[i] = min(face_conf, wconf)
 
     d_raw[~valid] = np.nan
@@ -180,4 +190,7 @@ def build_signal(
         ear_ratio=ear_ratio,
         wrist_above=wrist_above,
         kconf=kconf,
+        wrist_dy=wrist_dy,
+        elbow_raise=elbow_raise,
+        face_visible=face_visible,
     )

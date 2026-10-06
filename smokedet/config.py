@@ -60,6 +60,9 @@ class CycleConfig:
     lookaround: float = 2.0  # сек до/после паузы для поиска фаз подхода и отвода
     phone_ear_ratio: float = 0.75  # d(кисть, ухо) / d(кисть, рот) ниже — похоже на телефон
     min_wrist_above_elbow: float = 0.5  # доля кадров паузы, где запястье выше локтя
+    max_wrist_above_mouth: float = 0.1  # запястье выше рта больше чем на k*scale — рука у головы
+    max_elbow_raise: float = 0.15  # локоть выше плеча больше чем на k*scale — рука у головы
+    min_face_visible: float = 0.5  # доля кадров паузы с уверенно найденным носом
 
 
 @dataclass
@@ -69,16 +72,24 @@ class VerifierConfig:
     fallback_model: str = "weights/yolo11s.pt"  # COCO-модель, если open-vocab недоступен
     imgsz: int = 640
     conf: float = 0.12
-    frames_per_cycle: int = 4
+    frames_per_cycle: int = 6
     crop_margin: float = 0.9  # поле вокруг рта и кисти в единицах нормировки
+    wide_crop_margin: float = 2.0  # второй, широкий кроп для крупных предметов; 0 — отключить
     positive_classes: List[str] = field(
         default_factory=lambda: ["cigarette", "vape", "electronic cigarette", "smoke", "vapor cloud"]
     )
     negative_classes: List[str] = field(
-        default_factory=lambda: ["bottle", "cup", "mug", "drinking glass", "cell phone", "sandwich", "food"]
+        default_factory=lambda: [
+            "bottle", "water bottle", "cup", "mug", "drinking glass", "beverage can", "can", "jar",
+            "glass jar", "thermos", "cell phone", "sandwich", "food", "spoon", "fork",
+        ]  # fmt: skip
     )
+    # детектор часто называет так саму кисть: учитываются в доле негативов, но не как сильный негатив
+    weak_negative_classes: List[str] = field(default_factory=lambda: ["cell phone"])
     direct_min_frames: int = 2  # прямой признак: предмет в нескольких соседних кадрах
     negative_min_fraction: float = 0.5  # доля кропов с «чужим» предметом, чтобы отбросить цикл
+    strong_negative_conf: float = 0.25  # сильный негатив: предмет с такой уверенностью...
+    strong_negative_frames: int = 2  # ...минимум в стольких кадрах цикла отбрасывает цикл
 
 
 @dataclass
@@ -91,6 +102,7 @@ class EpisodeConfig:
     evidence_weight: float = 0.6  # вклад прямого признака
     evidence_conf_ref: float = 0.4  # уверенность верификатора, считающаяся «полной»
     negative_penalty: float = 0.5
+    event_negative_fraction: float = 0.5  # доля циклов с «чужим» предметом, отклоняющая событие
 
 
 @dataclass

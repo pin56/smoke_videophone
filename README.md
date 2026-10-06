@@ -80,7 +80,7 @@ python tools/draw_roi.py --video data/clip.mp4 --out data/roi_fountain.json
 | `predictions.csv` / `.json` | `camera_id, clip_id, event_id, start_sec, end_sec, confidence, label, person_track_id, peak_sec, x1, y1, x2, y2` — одна строка на событие, рамка человека в `peak_sec` в пикселях исходного кадра |
 | `manifest.json` | порог, правила объединения, версия, git-коммит, веса + sha256, лицензии, промпты, оборудование, полный конфиг |
 | `processing_log.csv` | длительность клипа, время по стадиям, `realtime_factor` (>1 — быстрее реального времени) |
-| `debug/<clip>.json` | все циклы (включая отброшенные с причиной: `short_hold`, `long_hold`, `phone_like`, `hand_low`, `no_approach`, `object:bottle`…) и события — для разбора ошибок |
+| `debug/<clip>.json` | все циклы (включая отброшенные с причиной: `short_hold`, `long_hold`, `phone_like`, `hand_low`, `hand_above_mouth`, `face_hidden`, `no_approach`, `object:bottle`…) и события (отклонённые — с `reject_reason`, например `objects_in_100%_cycles`) — для разбора ошибок |
 | `rendered/<clip>.mp4` | с `--render`: зона, рамки (зелёная — человек, жёлтая — кисть у рта, красная — событие `SMOKING-LIKE 0.82`) |
 | `cache/` | треки; повторный запуск с другими порогами не пересчитывает детекцию |
 

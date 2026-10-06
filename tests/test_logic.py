@@ -4,18 +4,19 @@ import json
 import numpy as np
 import pytest
 
-from smokedet.config import CycleConfig, EpisodeConfig, Config, load_config, with_overrides
+from smokedet.config import CycleConfig, EpisodeConfig, Config, VerifierConfig, load_config, with_overrides
 from smokedet.cycles import detect_cycles
 from smokedet.episodes import build_events
 from smokedet.evaluation import EvalParams, Item, evaluate
 from smokedet.geometry import TrackSignal, build_signal
 from smokedet.roi import Roi
 from smokedet.tracking import PersonObs, stitch_tracks
+from smokedet.verifier import ObjectVerifier
 
 FPS = 10.0
 
 
-def make_signal(d, track_id=1, ear_ratio=2.0, wrist_above=1.0):
+def make_signal(d, track_id=1, ear_ratio=2.0, wrist_above=1.0, wrist_dy=0.5, elbow_raise=-0.8, face_visible=1.0):
     d = np.asarray(d, dtype=float)
     n = len(d)
     t = np.arange(n) / FPS
@@ -33,6 +34,9 @@ def make_signal(d, track_id=1, ear_ratio=2.0, wrist_above=1.0):
         ear_ratio=np.full(n, ear_ratio),
         wrist_above=np.full(n, wrist_above),
         kconf=np.full(n, 0.8),
+        wrist_dy=np.full(n, wrist_dy),
+        elbow_raise=np.full(n, elbow_raise),
+        face_visible=np.full(n, face_visible),
     )
 
 
@@ -112,6 +116,58 @@ def test_phone_like_rejected():
     sig = make_signal(puffs([3, 10]), ear_ratio=0.4)
     cycles = detect_cycles(sig, CycleConfig())
     assert cycles and all("phone_like" in c.reject_reason for c in cycles)
+
+
+def test_hand_above_mouth_rejected():
+    # кисть у лба/волос: запястье выше рта или локоть выше плеча
+    for kw in ({"wrist_dy": -0.3}, {"elbow_raise": 0.25}):
+        cycles = detect_cycles(make_signal(puffs([3, 10]), **kw), CycleConfig())
+        assert cycles and all("hand_above_mouth" in c.reject_reason for c in cycles)
+
+
+def test_face_hidden_rejected():
+    cycles = detect_cycles(make_signal(puffs([3, 10]), face_visible=0.0), CycleConfig())
+    assert cycles and all("face_hidden" in c.reject_reason for c in cycles)
+
+
+def _verifier():
+    v = object.__new__(ObjectVerifier)  # без загрузки модели: проверяется только агрегация
+    cfg = VerifierConfig()
+    v.positive, v.negative = set(cfg.positive_classes), set(cfg.negative_classes)
+    return v, cfg
+
+
+def _cycle():
+    return detect_cycles(make_signal(puffs([3])), CycleConfig())[0]
+
+
+def test_strong_negative_rejects_cycle():
+    v, cfg = _verifier()
+    c = _cycle()
+    v._aggregate(c, [{"beverage can": 0.7}, {"beverage can": 0.3}, {}, {}, {}, {}], cfg)
+    assert not c.valid and c.reject_reason == "object:beverage can" and c.strong_negative == "beverage can"
+
+
+def test_weak_negative_and_positive_do_not_reject():
+    v, cfg = _verifier()
+    c = _cycle()  # «телефон» — частая ложная метка на кисти: сильным негативом не бывает
+    v._aggregate(c, [{"cell phone": 0.5}, {"cell phone": 0.5}, {}, {}, {}, {}], cfg)
+    assert c.valid and not c.strong_negative and c.neg_fraction == pytest.approx(2 / 6)
+    c = _cycle()  # сигарета рядом с бутылкой: цикл остаётся
+    v._aggregate(c, [{"bottle": 0.6, "cigarette": 0.3}, {"bottle": 0.6}, {}, {}, {}, {}], cfg)
+    assert c.valid and c.strong_negative == "bottle"
+
+
+def test_negatives_in_most_cycles_reject_event():
+    sig = make_signal(puffs([2, 8, 14], total=25))
+    cycles = detect_cycles(sig, CycleConfig())
+    for c in cycles[:2]:
+        c.neg_fraction = 1 / 6  # слабый предмет в одном кадре — цикл не отброшен
+    events = build_events({1: cycles}, {1: sig}, EpisodeConfig())
+    assert len(events) == 1 and not events[0].passed and events[0].reject_reason
+    cycles[1].neg_fraction = 0.0  # 1 из 3 циклов — событие остаётся
+    events = build_events({1: cycles}, {1: sig}, EpisodeConfig())
+    assert events[0].passed and not events[0].reject_reason
 
 
 def test_no_approach_rejected():
