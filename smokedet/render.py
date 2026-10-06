@@ -59,6 +59,7 @@ def render_video(
             by_frame[int(f)].append((tid, i))
     holds = {tid: [(c.hold_start, c.hold_end) for c in cs if c.valid] for tid, cs in cycles.items()}
     lit = {tid: [(f.start, f.end) for f in fs] for tid, fs in (flashes or {}).items()}
+    puffs = {tid: [(c.vapor_t, c.vapor_t + 1.0) for c in cs if c.vapor] for tid, cs in cycles.items()}
     shown = [e for e in events if e.passed]
     t0 = _start_datetime(start_time)
 
@@ -94,6 +95,8 @@ def render_video(
                 _label(frame, f"id{tid}", (x1, y1 - 2), color, fscale * 0.8, thick)
             if any(a <= t <= b for a, b in lit.get(tid, [])):
                 _label(frame, "FLASH", (x1, y2 + 4), ORANGE, fscale * 0.8, thick)
+            elif any(a <= t <= b for a, b in puffs.get(tid, [])):
+                _label(frame, "VAPOR", (x1, y2 + 4), WHITE, fscale * 0.8, thick)
             if not np.isnan(sig.mouth[i]).any():
                 cv2.circle(frame, tuple(sig.mouth[i].astype(int)), 2 * thick, WHITE, -1)
             if not np.isnan(sig.hand[i]).any():

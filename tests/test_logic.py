@@ -4,7 +4,9 @@ import json
 import numpy as np
 import pytest
 
-from smokedet.config import CycleConfig, EpisodeConfig, Config, FlashConfig, VerifierConfig, load_config, with_overrides
+from smokedet.config import (
+    CycleConfig, EpisodeConfig, Config, FlashConfig, VaporConfig, VerifierConfig, load_config, with_overrides,
+)  # fmt: skip
 from smokedet.cycles import detect_cycles
 from smokedet.episodes import build_events
 from smokedet.flash import Flash, LightMeter, attach_flashes, find_flashes
@@ -12,6 +14,7 @@ from smokedet.evaluation import EvalParams, Item, evaluate
 from smokedet.geometry import TrackSignal, build_signal
 from smokedet.roi import Roi
 from smokedet.tracking import PersonObs, stitch_tracks
+from smokedet.vapor import VaporMeter, measure_frame, peak_pair
 from smokedet.verifier import ObjectVerifier, reject_by_track_objects, scan_indices
 
 FPS = 10.0
@@ -368,3 +371,88 @@ def test_flash_raises_confidence():
     attach_flashes(lit, [Flash(1, 4.6, 4.9, 1.8, 0.1)], FlashConfig())
     cfg = EpisodeConfig()
     assert build_events({1: lit}, {1: sig}, cfg)[0].confidence > build_events({1: plain}, {1: sig}, cfg)[0].confidence
+
+
+def _cloud(frame, center, radius, alpha=0.5):
+    """Полупрозрачное белое облако: светлее и бледнее того, что под ним."""
+    yy, xx = np.mgrid[: frame.shape[0], : frame.shape[1]]
+    m = (xx - center[0]) ** 2 + (yy - center[1]) ** 2 <= radius**2
+    out = frame.copy()
+    out[m] = (out[m] * (1 - alpha) + 255 * alpha).astype(np.uint8)
+    return out
+
+
+def test_measure_frame():
+    cfg = VaporConfig()
+    bg = np.zeros((400, 400, 3), np.uint8)
+    bg[:] = (120, 90, 60)  # BGR, заметная насыщенность
+    mouth, face, box = np.array([125.0, 123.0]), np.array([125.0, 117.0]), np.array([95.0, 100.0, 155.0, 300.0])
+    args = dict(mouth=mouth, face=face, hand=None, scale=40.0, box=box, others=[], cfg=cfg)
+    net, kept = measure_frame(bg, bg, (0, 0), **args)
+    assert net == pytest.approx(0.0) and 0.3 < kept < 1.0
+    cloud = _cloud(bg, (175, 105), 25)
+    assert measure_frame(cloud, bg, (0, 0), **args)[0] > 0.1  # облако у лица, вне головы и тела
+    dark = bg.copy()
+    dark[85:125, 155:195] = 0
+    assert measure_frame(dark, bg, (0, 0), **args)[0] < 0  # тёмный предмет — не дымка
+    lit = np.clip(bg.astype(int) + 40, 0, 255).astype(np.uint8)
+    assert abs(measure_frame(lit, bg, (0, 0), **args)[0]) < 0.05  # общая засветка снимается кольцом
+    full = measure_frame(cloud, bg, (0, 0), **args)
+    part = measure_frame(cloud[40:, 60:], bg[40:, 60:], (60, 40), **args)  # тот же замер на вырезанном прямоугольнике
+    assert part[0] == pytest.approx(full[0], abs=0.02)
+    _, kept_crowd = measure_frame(cloud, bg, (0, 0), **{**args, "others": [np.array([150.0, 50.0, 250.0, 200.0])]})
+    assert kept_crowd < kept  # чужая рамка вычитается из зоны
+
+
+def test_peak_pair():
+    t = [0, 1, 2, 3, 4, 5]
+    net = [0.0, 0.5, 0.0, 0.3, 0.35, 0.0]
+    assert peak_pair(t, net, [True] * 6) == (pytest.approx(0.3), 3)  # одиночный всплеск 0.5 не считается
+    assert peak_pair(t, net, [True, True, True, True, False, True])[0] == pytest.approx(0.0)
+    assert np.isnan(peak_pair(t, net, [False] * 6)[0])
+
+
+def _vapor_video(path, cloud_at=None, seconds=12.0, fps=30.0):
+    import cv2
+
+    bg = np.zeros((320, 320, 3), np.uint8)
+    bg[:] = (120, 90, 60)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (320, 320))
+    for i in range(int(seconds * fps)):
+        t = i / fps
+        writer.write(_cloud(bg, (168, 108), 24, 0.6) if cloud_at and cloud_at[0] <= t <= cloud_at[1] else bg)
+    writer.release()
+    return str(path)
+
+
+def test_vapor_meter(tmp_path):
+    sig = make_signal(puffs([5]))  # рот (130, 120), кисть (130, 150), scale 30, кадр = 3 * отсчёт
+    cfg = VaporConfig()
+    cycles = detect_cycles(sig, CycleConfig())
+    hold_end = cycles[0].hold_end
+    puff = _vapor_video(tmp_path / "puff.avi", (hold_end + 0.2, hold_end + 1.5))
+    VaporMeter().measure("c", puff, {1: cycles}, {1: sig}, cfg)
+    c = cycles[0]
+    assert c.vapor and c.vapor_net >= cfg.min_net and hold_end <= c.vapor_t <= hold_end + 1.5
+    clean = detect_cycles(sig, CycleConfig())
+    VaporMeter().measure("c", _vapor_video(tmp_path / "clean.avi"), {1: clean}, {1: sig}, cfg)
+    assert not clean[0].vapor and abs(clean[0].vapor_net) < 0.05
+    moved = make_signal(puffs([5]))
+    moved.boxes[moved.t > hold_end - 1.0] += [100, 0, 100, 0]  # человек ушёл: фон за ним другой
+    walk = detect_cycles(moved, CycleConfig())
+    VaporMeter().measure("c", puff, {1: walk}, {1: moved}, cfg)
+    assert not walk[0].vapor and np.isnan(walk[0].vapor_net)
+
+
+def test_vapor_makes_single_puff_an_event():
+    sig = make_signal(puffs([5]))
+    cycles = detect_cycles(sig, CycleConfig())
+    cycles[0].vapor = True
+    events = build_events({1: cycles}, {1: sig}, EpisodeConfig())
+    assert len(events) == 1 and events[0].passed and events[0].vapor
+    assert build_events({1: cycles}, {1: sig}, EpisodeConfig(vapor_as_direct=False)) == []
+    sig2 = make_signal(puffs([5, 12]))
+    two = detect_cycles(sig2, CycleConfig())
+    plain = build_events({1: two}, {1: sig2}, EpisodeConfig())[0].confidence
+    two[1].vapor = True
+    assert build_events({1: two}, {1: sig2}, EpisodeConfig())[0].confidence > plain

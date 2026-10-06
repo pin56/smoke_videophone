@@ -1,8 +1,8 @@
 """Правило положительного эпизода и объединение циклов в события.
 
 Цикл «квалифицирован», если в пределах окна 20 с у того же человека есть ещё полный цикл
-(всего >= min_cycles в окне) или у самого цикла есть прямой признак (предмет/дым от верификатора
-или, если flash_as_direct, вспышка зажигалки рядом по времени).
+(всего >= min_cycles в окне) или у самого цикла есть прямой признак (предмет/дым от верификатора,
+если flash_as_direct — вспышка зажигалки рядом по времени, если vapor_as_direct — выдох пара).
 Квалифицированные циклы одного человека объединяются в событие при паузе <= 15 с.
 События разных людей не объединяются. Событие без прямого признака отклоняется, если «чужие»
 предметы (питьё, еда) видны в большинстве его циклов: по отдельности слабые детекции
@@ -40,6 +40,10 @@ class Event:
     def flash(self) -> bool:
         return any(c.flash for c in self.cycles)
 
+    @property
+    def vapor(self) -> bool:
+        return any(c.vapor for c in self.cycles)
+
     def to_dict(self) -> dict:
         return {
             "track_id": self.track_id,
@@ -52,13 +56,14 @@ class Event:
             "n_cycles": len(self.cycles),
             "direct": self.direct,
             "flash": self.flash,
+            "vapor": self.vapor,
             "reject_reason": self.reject_reason,
         }
 
 
 def has_evidence(c: Cycle, cfg: EpisodeConfig) -> bool:
-    """Прямой признак у цикла: предмет от верификатора или вспышка зажигалки."""
-    return c.direct or (cfg.flash_as_direct and c.flash)
+    """Прямой признак у цикла: предмет от верификатора, вспышка зажигалки или выдох пара."""
+    return c.direct or (cfg.flash_as_direct and c.flash) or (cfg.vapor_as_direct and c.vapor)
 
 
 def qualifying_cycles(cycles: List[Cycle], cfg: EpisodeConfig) -> List[Cycle]:
@@ -86,6 +91,8 @@ def event_confidence(cycles: List[Cycle], cfg: EpisodeConfig) -> float:
     ev = min(evidence / cfg.evidence_conf_ref, 1.0)
     if any(c.flash for c in cycles):  # вспышка повышает confidence и при flash_as_direct=false
         ev = max(ev, cfg.flash_evidence)
+    if any(c.vapor for c in cycles):  # пар — тоже, независимо от vapor_as_direct
+        ev = max(ev, cfg.vapor_evidence)
     if ev > 0:
         conf = 1.0 - (1.0 - conf) * (1.0 - cfg.evidence_weight * ev)
     neg = float(np.mean([c.neg_fraction for c in cycles])) if cycles else 0.0

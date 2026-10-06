@@ -113,6 +113,24 @@ class FlashConfig:
 
 
 @dataclass
+class VaporConfig:
+    enabled: bool = True
+    zone_radius: float = 1.6  # зона воздуха вокруг рта, в единицах нормировки
+    head_radius: float = 0.6  # голова исключается: круг вокруг центра лица
+    hand_radius: float = 0.6  # кисть исключается
+    body_offset: float = 0.5  # тело исключается: внутри рамки ниже рта на столько
+    min_rise: int = 10  # пиксель дымки: светлее фона на столько уровней (0..255) и не насыщеннее
+    min_net: float = 0.22  # чистая дымка (доля зоны) в двух годных кадрах подряд — пар
+    bg_before: float = 2.5  # с: фон — кадры от начала цикла минус bg_before...
+    bg_gap: float = 0.2  # ...до начала цикла минус bg_gap
+    bg_min_frames: int = 3
+    window_before: float = 0.5  # с: замер от конца паузы минус столько...
+    window_after: float = 3.0  # ...до конца паузы плюс столько
+    min_kept: float = 0.3  # кадр годен, если от зоны осталось не меньше этой доли (соседи, край кадра)...
+    max_shift: float = 0.25  # ...и рамка сдвинулась от фона не больше чем на долю высоты
+
+
+@dataclass
 class EpisodeConfig:
     window: float = 20.0  # два полных цикла в пределах 20 с
     min_cycles: int = 2
@@ -125,6 +143,8 @@ class EpisodeConfig:
     event_negative_fraction: float = 0.5  # доля циклов с «чужим» предметом, отклоняющая событие
     flash_as_direct: bool = True  # вспышка зажигалки — прямой признак (1 цикл + вспышка = эпизод)
     flash_evidence: float = 1.0  # вклад вспышки в confidence, доля от полного прямого признака
+    vapor_as_direct: bool = True  # выдох пара — прямой признак (1 цикл + пар = эпизод)
+    vapor_evidence: float = 1.0  # вклад пара в confidence, доля от полного прямого признака
 
 
 @dataclass
@@ -150,6 +170,7 @@ SECTIONS = {
     "cycle": CycleConfig,
     "verifier": VerifierConfig,
     "flash": FlashConfig,
+    "vapor": VaporConfig,
     "episode": EpisodeConfig,
     "report": ReportConfig,
 }
@@ -164,6 +185,7 @@ class Config:
     cycle: CycleConfig = field(default_factory=CycleConfig)
     verifier: VerifierConfig = field(default_factory=VerifierConfig)
     flash: FlashConfig = field(default_factory=FlashConfig)
+    vapor: VaporConfig = field(default_factory=VaporConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
 

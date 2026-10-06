@@ -46,6 +46,10 @@ class Cycle:
     # заполняет flash.attach_flashes: рядом по времени была вспышка зажигалки
     flash: bool = False
     flash_area: float = 0.0
+    # заполняет vapor.VaporMeter: после паузы у рта появилась дымка (выдох пара или дыма)
+    vapor: bool = False
+    vapor_net: float = float("nan")  # чистая дымка, доля зоны; nan — не замерить (идёт, перекрыт)
+    vapor_t: float = float("nan")  # момент максимума дымки
 
     @property
     def hold(self) -> float:
@@ -78,6 +82,9 @@ class Cycle:
             "objects": {k: round(v, 3) for k, v in self.objects.items()},
             "flash": self.flash,
             "flash_area": round(self.flash_area, 3),
+            "vapor": self.vapor,
+            "vapor_net": None if np.isnan(self.vapor_net) else round(self.vapor_net, 3),
+            "vapor_t": None if np.isnan(self.vapor_t) else round(self.vapor_t, 3),
         }
 
 
