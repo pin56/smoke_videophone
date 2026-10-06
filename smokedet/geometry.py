@@ -3,6 +3,8 @@
 В COCO-17 нет точки рта, поэтому рот оценивается от носа (или глаз, или ушей) со смещением
 в сторону середины плеч. Кисть — продолжение предплечья за запястье. Расстояние нормируется
 на размер человека (ширина плеч или доля высоты bbox), чтобы пороги не зависели от дистанции.
+В толпе поза может «пришить» человеку чужую руку: анатомически неправдоподобная рука
+(слишком длинная или с запястьем далеко за рамкой) в отсчёте не учитывается.
 """
 from __future__ import annotations
 
@@ -43,6 +45,8 @@ class TrackSignal:
     light_area: Optional[np.ndarray] = None  # (N,) новый пересвет у рта/кистей / scale^2 (flash.py)
     light_ring: Optional[np.ndarray] = None  # (N,) новый пересвет вокруг человека / scale^2
     face: Optional[np.ndarray] = None  # (N, 2) центр уверенных точек лица (нос, глаза, уши), nan если нет
+    head_pitch: Optional[np.ndarray] = None  # (N,) (y ушей - y носа) / scale: растёт, когда голова запрокинута
+    arm_dropped: Optional[np.ndarray] = None  # (N,) сколько рук отброшено как неправдоподобные (arm_plausible)
 
     def __len__(self) -> int:
         return len(self.t)
@@ -107,12 +111,50 @@ def estimate_mouth(k: np.ndarray, scale: float, thr: float) -> Tuple[Optional[np
     return ref + down * MOUTH_OFFSET[kind] * scale, conf
 
 
-def nearest_hand(k: np.ndarray, mouth: np.ndarray, scale: float, cfg: GeometryConfig):
+ARMS = ((L_WRI, L_ELB, L_SHO), (R_WRI, R_ELB, R_SHO))
+
+
+def arm_plausible(k: np.ndarray, box: np.ndarray, scale: float, cfg: GeometryConfig) -> Tuple[bool, bool]:
+    """Правдоподобна ли левая и правая рука. Неправдоподобна, если плечо (плечо→локоть) или предплечье
+    (локоть→запястье) длиннее k*scale или запястье далеко за рамкой человека: так отсекается рука
+    соседа, которую поза «пришила» в толпе, и рамки на двоих. Отношение предплечья к плечу
+    не проверяется: в проекции оно меняется от 0.1 до 30 у своей руки (локоть к камере у рта).
+    Проверяются только найденные точки; порог 0 отключает проверку."""
+    thr = cfg.min_kpt_conf
+    out = []
+    for wri, elb, sho in ARMS:
+        w, e, s = _pt(k, wri, thr), _pt(k, elb, thr), _pt(k, sho, thr)
+        ok = True
+        if cfg.max_upper_arm > 0 and e is not None and s is not None:
+            ok = ok and float(np.linalg.norm(e - s)) <= cfg.max_upper_arm * scale
+        if cfg.max_forearm > 0 and w is not None and e is not None:
+            ok = ok and float(np.linalg.norm(w - e)) <= cfg.max_forearm * scale
+        if cfg.max_wrist_outside > 0 and w is not None:
+            dx = max(box[0] - w[0], 0.0, w[0] - box[2])
+            dy = max(box[1] - w[1], 0.0, w[1] - box[3])
+            ok = ok and float(np.hypot(dx, dy)) <= cfg.max_wrist_outside * scale
+        out.append(ok)
+    return out[0], out[1]
+
+
+def head_pitch(k: np.ndarray, scale: float, thr: float) -> float:
+    """Высота носа над линией ушей, в единицах scale; nan без носа или обоих ушей. При запрокидывании
+    головы (питьё из бутылки, кружки) нос поднимается относительно ушей, и значение растёт."""
+    nose = _pt(k, NOSE, thr)
+    ears = [p for p in (_pt(k, L_EAR, thr), _pt(k, R_EAR, thr)) if p is not None]
+    if nose is None or not ears:
+        return float("nan")
+    return float((np.mean([p[1] for p in ears]) - nose[1]) / scale)
+
+
+def nearest_hand(k: np.ndarray, mouth: np.ndarray, scale: float, cfg: GeometryConfig, skip: Tuple[bool, bool] = (False, False)):
     """Возвращает (кисть, расстояние до рта в единицах scale, ear_ratio, wrist_above, conf запястья,
-    wrist_dy, elbow_raise) для руки, ближайшей ко рту."""
+    wrist_dy, elbow_raise) для руки, ближайшей ко рту. skip — не рассматривать левую/правую руку."""
     thr = cfg.min_kpt_conf
     best = None
-    for wri, elb, sho in ((L_WRI, L_ELB, L_SHO), (R_WRI, R_ELB, R_SHO)):
+    for (wri, elb, sho), skipped in zip(ARMS, skip):
+        if skipped:
+            continue
         w = _pt(k, wri, thr)
         if w is None:
             continue
@@ -166,15 +208,21 @@ def build_signal(
     elbow_raise = np.full(n, np.nan)
     face_visible = np.array([float(o.kpts[NOSE, 2] >= geo.min_kpt_conf) for o in obs])
     face = np.full((n, 2), np.nan)
+    pitch = np.full(n, np.nan)
+    arm_dropped = np.zeros(n)
     for i, o in enumerate(obs):
         c = _mean([_pt(o.kpts, j, geo.min_kpt_conf) for j in (NOSE, L_EYE, R_EYE, L_EAR, R_EAR)])
         if c is not None:
             face[i] = c
+        pitch[i] = head_pitch(o.kpts, scale[i], geo.min_kpt_conf)
         m, face_conf = estimate_mouth(o.kpts, scale[i], geo.min_kpt_conf)
         if m is None:
             continue
         mouth[i] = m
-        res = nearest_hand(o.kpts, m, scale[i], geo)
+        # только здесь, а не в flash.LightMeter: его замеры уже лежат в кэше треков
+        skip = tuple(not ok for ok in arm_plausible(o.kpts, o.box, scale[i], geo))
+        arm_dropped[i] = sum(skip)
+        res = nearest_hand(o.kpts, m, scale[i], geo, skip)
         if res is None:
             continue
         hand[i], d_raw[i], ear_ratio[i], wrist_above[i], wconf, wrist_dy[i], elbow_raise[i] = res
@@ -210,4 +258,6 @@ def build_signal(
         light_area=light_area,
         light_ring=light_ring,
         face=face,
+        head_pitch=pitch,
+        arm_dropped=arm_dropped,
     )

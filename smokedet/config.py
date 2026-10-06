@@ -48,6 +48,10 @@ class GeometryConfig:
     scale_bbox_ratio: float = 0.12  # нижняя граница нормировки: доля высоты bbox
     scale_window: float = 2.0  # сек, скользящая медиана нормировки
     smooth_window: int = 3  # отсчётов, медианное сглаживание d(t)
+    # неправдоподобная рука (чужая в толпе) не учитывается в отсчёте; 0 — проверка отключена
+    max_upper_arm: float = 3.0  # плечо (плечо→локоть) длиннее k*scale
+    max_forearm: float = 3.0  # предплечье (локоть→запястье) длиннее k*scale
+    max_wrist_outside: float = 1.0  # запястье за рамкой человека дальше k*scale
 
 
 @dataclass
@@ -63,6 +67,7 @@ class CycleConfig:
     max_wrist_above_mouth: float = 0.1  # запястье выше рта больше чем на k*scale — рука у головы
     max_elbow_raise: float = 0.15  # локоть выше плеча больше чем на k*scale — рука у головы
     min_face_visible: float = 0.5  # доля кадров паузы с уверенно найденным носом
+    max_head_tilt: float = 0.0  # нос поднялся над ушами в паузе больше чем на k*scale — питьё; 0 — отключено
 
 
 @dataclass
@@ -134,7 +139,10 @@ class VaporConfig:
 class EpisodeConfig:
     window: float = 20.0  # два полных цикла в пределах 20 с
     min_cycles: int = 2
+    # с: цикл, начавшийся не позже этого после конца предыдущего, — то же движение; < 0 — отключено
+    min_cycle_gap: float = 0.05
     merge_gap: float = 15.0  # циклы одного человека объединяются при паузе <= 15 с
+    box_window: float = 0.5  # с: рамка события — медиана рамок трека в ±box_window от пика; 0 — рамка в пике
     confidence_threshold: float = 0.5
     cycle_weight: float = 0.45  # вклад одного идеального цикла в confidence
     evidence_weight: float = 0.6  # вклад прямого признака
