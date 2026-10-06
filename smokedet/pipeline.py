@@ -1,4 +1,4 @@
-"""Оркестрация обработки клипа: трекинг (с кэшем) → сигналы → циклы → верификатор → вспышки → события → выход."""
+"""Оркестрация обработки клипа: трекинг (с кэшем) → сигналы → циклы → верификатор → вспышки → пар → события → выход."""
 from __future__ import annotations
 
 import csv
@@ -18,6 +18,7 @@ from .geometry import TrackSignal, build_signal
 from .io_video import frame_stride, probe_video
 from .roi import Roi
 from .tracking import PoseTracker, TrackSet, select_device, stitch_tracks
+from .vapor import VaporMeter
 from .verifier import ObjectVerifier
 
 log = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class Pipeline:
                 cfg.verifier, model=project_path(cfg.verifier.model), fallback_model=project_path(cfg.verifier.fallback_model)
             )
             self.verifier = ObjectVerifier(vcfg, self.device)
+        self.vapor = VaporMeter()
 
     @property
     def tracker(self) -> PoseTracker:
@@ -139,6 +141,8 @@ class Pipeline:
                 if track_flashes:
                     flashes[tid] = track_flashes
                     attach_flashes(cycles[tid], track_flashes, cfg.flash)
+        if cfg.vapor.enabled:  # после верификатора: пар замеряется только у оставшихся валидными циклов
+            self.vapor.measure(clip.clip_id, clip.video_path, cycles, signals, cfg.vapor)
         events = build_events(cycles, signals, cfg.episode)
         return Analysis(signals=signals, cycles=cycles, events=events, flashes=flashes)
 

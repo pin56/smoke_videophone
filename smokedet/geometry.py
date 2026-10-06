@@ -42,6 +42,7 @@ class TrackSignal:
     face_visible: np.ndarray  # (N,) 1 — нос найден уверенно, 0 — рот оценён по глазам/ушам
     light_area: Optional[np.ndarray] = None  # (N,) новый пересвет у рта/кистей / scale^2 (flash.py)
     light_ring: Optional[np.ndarray] = None  # (N,) новый пересвет вокруг человека / scale^2
+    face: Optional[np.ndarray] = None  # (N, 2) центр уверенных точек лица (нос, глаза, уши), nan если нет
 
     def __len__(self) -> int:
         return len(self.t)
@@ -164,7 +165,11 @@ def build_signal(
     wrist_dy = np.full(n, np.nan)
     elbow_raise = np.full(n, np.nan)
     face_visible = np.array([float(o.kpts[NOSE, 2] >= geo.min_kpt_conf) for o in obs])
+    face = np.full((n, 2), np.nan)
     for i, o in enumerate(obs):
+        c = _mean([_pt(o.kpts, j, geo.min_kpt_conf) for j in (NOSE, L_EYE, R_EYE, L_EAR, R_EAR)])
+        if c is not None:
+            face[i] = c
         m, face_conf = estimate_mouth(o.kpts, scale[i], geo.min_kpt_conf)
         if m is None:
             continue
@@ -204,4 +209,5 @@ def build_signal(
         face_visible=face_visible,
         light_area=light_area,
         light_ring=light_ring,
+        face=face,
     )
