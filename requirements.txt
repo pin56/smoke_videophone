@@ -5,7 +5,7 @@
 #     uv pip install --python <python венва> torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu126
 #   macOS (MPS) или только CPU:
 #     uv pip install --python <python венва> torch==2.14.1 torchvision==0.29.1
-ultralytics==8.4.173  # код рассчитывает на поведение 8.4 (см. PoseTracker._half)
+ultralytics==8.4.173  # код рассчитывает на поведение 8.4 (FP16 через quantize, см. tracking.half_kwargs)
 opencv-python==5.0.0.93  # чтение кадров и их pts (CAP_PROP_POS_MSEC) проверены на этой сборке
 numpy>=2.0,<3
 pyyaml>=6.0,<7

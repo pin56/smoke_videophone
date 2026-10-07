@@ -79,6 +79,13 @@ def select_device(pref: str) -> str:
     return "cpu"
 
 
+def half_kwargs(enabled: bool, device: str) -> dict:
+    """Аргументы FP16 для predict/track ultralytics: только на CUDA (на cpu и mps не используется).
+    В ultralytics 8.4 точность задаёт quantize=16: half (и явный half=False) устарел и даёт предупреждение
+    на каждом кадре. FP32 — аргумент не передаётся."""
+    return {"quantize": 16} if enabled and str(device) not in ("cpu", "mps") else {}
+
+
 def box_iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """IoU набора рамок a (N,4) с одной рамкой b (4,)."""
     a = np.atleast_2d(a)
@@ -103,7 +110,7 @@ class PoseTracker:
             raise ValueError(f"{cfg.pose_model}: нужна pose-модель, получена задача '{self.model.task}'")
         # отдельный экземпляр: predict() на основной модели запустил бы колбэки трекера на кропах
         self.refiner = YOLO(cfg.pose_model) if cfg.refine_small else None
-        self._half = {"half": True} if cfg.half else {}  # в ultralytics 8.4 явный half=False даёт предупреждение
+        self._half = half_kwargs(cfg.half, device)
 
     def _track_frame(self, frame: np.ndarray, first: bool):
         cfg = self.cfg

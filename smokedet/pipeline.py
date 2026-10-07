@@ -5,10 +5,12 @@ import csv
 import dataclasses
 import hashlib
 import logging
+import multiprocessing
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from .config import Config
 from .cycles import Cycle, detect_cycles
@@ -24,6 +26,7 @@ from .verifier import ObjectVerifier
 log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
+LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 
 
 @dataclass
@@ -86,8 +89,9 @@ def read_inputs_csv(path: str) -> List[ClipInput]:
 
 
 class Pipeline:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, progress: bool = True):
         self.cfg = cfg
+        self.progress = progress  # полоса прогресса трекера (в параллельных процессах выключена)
         self.device = select_device(cfg.detector.device)
         self._tracker: Optional[PoseTracker] = None
         self.verifier: Optional[ObjectVerifier] = None
@@ -130,7 +134,7 @@ class Pipeline:
         stride = frame_stride(meta.fps, self.cfg.video.target_fps)
         log.info("[%s] %dx%d, %.2f fps, %.1f с, анализ каждого %d-го кадра, устройство %s",
                  clip.clip_id, meta.width, meta.height, meta.fps, meta.duration, stride, self.device)  # fmt: skip
-        ts = self.tracker.run(meta, stride)
+        ts = self.tracker.run(meta, stride, progress=self.progress)
         ts.cache_key = key
         if cache_path is not None:
             ts.save(cache_path)
@@ -209,3 +213,49 @@ class Pipeline:
             "from_cache": int(from_cache),
         }
         return records, log_row, analysis
+
+    def info(self) -> dict:
+        """Устройство и фактические веса верификатора — для manifest.json."""
+        return {"device": self.device, "verifier": self.verifier.describe() if self.verifier else None}
+
+
+_worker: Optional[Pipeline] = None  # пайплайн процесса-обработчика (process_clips с workers > 1)
+
+
+def _init_worker(cfg: Config, log_level: int) -> None:
+    global _worker
+    logging.basicConfig(level=log_level, format=LOG_FORMAT, datefmt="%H:%M:%S")
+    _worker = Pipeline(cfg, progress=False)
+
+
+def _process_in_worker(i: int, clip: ClipInput, out_dir: Path, render: bool, use_cache: bool):
+    records, log_row, _ = _worker.process(clip, out_dir, render=render, use_cache=use_cache)
+    return i, records, log_row, _worker.info()
+
+
+def process_clips(
+    cfg: Config, clips: List[ClipInput], out_dir: Path, render: bool = False, use_cache: bool = True, workers: int = 1
+) -> Iterator[Tuple[int, list, dict, dict]]:
+    """(номер клипа в clips, записи событий, строка журнала, info() пайплайна) по мере готовности клипов.
+
+    workers > 1 — клипы обрабатываются параллельно в отдельных процессах, у каждого свои модели: пока один
+    процесс декодирует кадры и считает на CPU, GPU занят другим. Процессы запускаются через spawn (CUDA
+    не переносит fork); клипы раздаются по одному, поэтому длинный клип не задерживает остальные."""
+    if workers <= 1 or len(clips) <= 1:
+        pipeline = Pipeline(cfg)
+        for i, clip in enumerate(clips):
+            records, log_row, _ = pipeline.process(clip, out_dir, render=render, use_cache=use_cache)
+            yield i, records, log_row, pipeline.info()
+        return
+    workers = min(workers, len(clips))
+    log.info("Параллельная обработка: %d процесса(ов) на %d клипов", workers, len(clips))
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(workers, mp_context=ctx, initializer=_init_worker,
+                             initargs=(cfg, logging.getLogger().getEffectiveLevel())) as pool:  # fmt: skip
+        futures = [pool.submit(_process_in_worker, i, clip, out_dir, render, use_cache) for i, clip in enumerate(clips)]
+        try:
+            for future in as_completed(futures):
+                yield future.result()
+        finally:  # ошибка клипа или прерывание: ещё не начатые клипы не запускаются
+            for future in futures:
+                future.cancel()

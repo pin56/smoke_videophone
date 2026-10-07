@@ -26,7 +26,7 @@ class DetectorConfig:
     iou: float = 0.6
     tracker: str = "configs/bytetrack_cctv.yaml"
     device: str = "auto"  # auto | cpu | mps | 0
-    half: bool = False
+    half: bool = True  # FP16, только на CUDA
     refine_small: bool = True  # повторная поза на увеличенном кропе для мелких людей
     refine_max_height: int = 220
     refine_imgsz: int = 320
@@ -77,6 +77,7 @@ class VerifierConfig:
     fallback_model: str = "weights/yolo11s.pt"  # COCO-модель, если open-vocab недоступен
     imgsz: int = 640
     conf: float = 0.12
+    half: bool = True  # FP16, только на CUDA
     frames_per_cycle: int = 6
     crop_margin: float = 0.9  # поле вокруг рта и кисти в единицах нормировки
     wide_crop_margin: float = 2.0  # второй, широкий кроп для крупных предметов; 0 — отключить

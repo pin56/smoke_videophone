@@ -12,7 +12,7 @@ detector:
   iou: 0.6
   tracker: configs/bytetrack_cctv.yaml
   device: auto              # auto | cpu | mps | 0
-  half: false               # true только для CUDA
+  half: true                # FP16, только на CUDA (на cpu/mps не используется)
   refine_small: true        # повторная поза на увеличенном кропе для мелких людей
   refine_max_height: 220    # px, ниже — уточняем
   refine_imgsz: 320
@@ -56,6 +56,7 @@ verifier:
   fallback_model: weights/yolo11s.pt    # COCO-детектор, если open-vocab недоступен
   imgsz: 640
   conf: 0.12
+  half: true                # FP16, только на CUDA
   frames_per_cycle: 6       # кадров на цикл, равномерно по паузе
   crop_margin: 0.9          # поле вокруг рта и кисти, в единицах нормировки
   wide_crop_margin: 2.0     # второй, широкий кроп: банки и бутылки узкий обрезает; 0 — отключить

@@ -120,3 +120,42 @@ def test_frame_reader_exact_frame_on_vfr(monkeypatch, real_fps, valid_pts):
         assert reader.pts_seek
     if clock.synthetic_from is None:
         assert len(opened) == 1  # все переходы — seek по pts, без чтения с начала
+
+
+@pytest.mark.parametrize("valid_pts", [True, False])
+def test_prefetch_matches_plain_reading(monkeypatch, valid_pts):
+    # фоновое чтение даёт те же кадры и время, а часы после прохода знают, где время синтетическое
+    pts_ms = [i * 1000 / 26.0 for i in range(120)]
+    monkeypatch.setattr(io_video, "_open", lambda path: VfrCapture(pts_ms, valid_pts))
+    runs = []
+    for prefetch in (0, 3):
+        clock = FrameClock(VfrCapture.FPS)
+        frames = [(i, t, int(f[0, 0, 0])) for i, t, f in io_video.iter_sampled_frames("v.mp4", 3, 25.0, clock, prefetch)]
+        runs.append((frames, clock.synthetic_from))
+    assert runs[0] == runs[1] and len(runs[0][0]) == 40
+
+
+def test_prefetched_order_errors_and_early_exit():
+    assert list(io_video.prefetched(iter(range(50)), 2)) == list(range(50))
+
+    def failing():
+        yield 1
+        raise ValueError("битый кадр")
+
+    it = io_video.prefetched(failing(), 2)
+    assert next(it) == 1
+    with pytest.raises(ValueError, match="битый кадр"):
+        next(it)
+
+    closed = []
+
+    def source():
+        try:
+            yield from range(1000)
+        finally:
+            closed.append(1)
+
+    it = io_video.prefetched(source(), 2)
+    assert next(it) == 0
+    it.close()  # досрочный выход: поток остановлен, источник закрыт (в нём освобождается VideoCapture)
+    assert closed == [1]
