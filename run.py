@@ -78,7 +78,8 @@ def main(argv=None) -> int:
         write_processing_log(log_rows, out_dir)
         logging.info("Клипов готово: %d из %d", len(done), len(clips))
 
-    write_manifest(out_dir, cfg, info.get("device") or select_device(cfg.detector.device), info.get("verifier"), ROOT)
+    write_manifest(out_dir, cfg, info.get("device") or select_device(cfg.detector.device), info.get("verifier"), ROOT,
+                   info.get("appearance"))  # fmt: skip
     total = sum(r["duration_sec"] for r in log_rows)
     wall = time.time() - start
     logging.info("Готово: %d клипов, %.1f с видео за %.1f с (×%.2f реального времени), событий %d → %s", len(clips), total,

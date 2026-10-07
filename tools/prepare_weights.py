@@ -48,6 +48,14 @@ def main(argv=None) -> int:
         print(f"Не удалось сохранить {baked}", file=sys.stderr)
         return 1
     print(f"словарь верификатора: {baked} ({'уже был' if not v.clip_used else 'запечён сейчас'}): {file_sha256(str(baked))}")
+
+    import clip
+
+    from smokedet.appearance import weights_path
+
+    wdir = project_path(cfg.appearance.weights_dir)
+    clip.load(cfg.appearance.model, device="cpu", download_root=wdir)  # скачивает недостающий файл
+    print(f"CLIP внешнего вида {cfg.appearance.model}: {file_sha256(weights_path(cfg.appearance.model, wdir))}")
     return 0
 
 

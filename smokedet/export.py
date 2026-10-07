@@ -125,7 +125,9 @@ def hardware_info(device: str) -> dict:
     return info
 
 
-def write_manifest(out_dir: Path, cfg: Config, device: str, verifier: Optional[dict], repo: Path) -> dict:
+def write_manifest(
+    out_dir: Path, cfg: Config, device: str, verifier: Optional[dict], repo: Path, appearance: Optional[dict] = None
+) -> dict:
     ep = cfg.episode
     manifest = {
         "team": cfg.report.team,
@@ -150,6 +152,8 @@ def write_manifest(out_dir: Path, cfg: Config, device: str, verifier: Optional[d
             "tracker": {"config": cfg.detector.tracker, "type": "ByteTrack (Ultralytics)"},
             "verifier": None if verifier is None else {**verifier, "sha256": file_sha256(verifier["weights"]),
                                                        "license": "AGPL-3.0 (Ultralytics)"},
+            "appearance": None if appearance is None else {**appearance, "license": "MIT (OpenAI CLIP)",
+                                                           "fine_tuning": "нет, zero-shot по текстовым описаниям"},
         },  # fmt: skip
         "prompts": None if verifier is None else (verifier.get("positive_classes", []) + verifier.get("negative_classes", [])
                                                   + verifier.get("track_negative_classes", [])),

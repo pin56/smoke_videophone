@@ -12,9 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
+from .appearance import AppearanceScorer
 from .config import Config
 from .cycles import Cycle, detect_cycles
-from .episodes import Event, build_events
+from .episodes import Event, build_events, has_evidence
 from .flash import Flash, attach_flashes, find_flashes
 from .geometry import TrackSignal, build_signal
 from .io_video import frame_stride, probe_video
@@ -98,6 +99,7 @@ class Pipeline:
         if cfg.verifier.enabled:
             self._load_verifier(cfg)
         self.vapor = VaporMeter()
+        self.appearance = AppearanceScorer(self.device, project_path(cfg.appearance.weights_dir))
 
     def _load_verifier(self, cfg: Config) -> ObjectVerifier:
         """Модель верификатора грузится один раз; в tune.py сетка может включить его при выключенном в базе."""
@@ -163,6 +165,9 @@ class Pipeline:
                     attach_flashes(cycles[tid], track_flashes, cfg.flash)
         if cfg.vapor.enabled:  # после верификатора: пар замеряется только у оставшихся валидными циклов
             self.vapor.measure(clip.clip_id, clip.video_path, cycles, signals, cfg.vapor, ts.meta.synthetic_from)
+        if cfg.appearance.enabled:  # последней: циклы с прямым признаком (предмет, вспышка, пар) не отбрасывает
+            self.appearance.score(clip.clip_id, clip.video_path, cycles, signals, cfg.appearance,
+                                  lambda c: has_evidence(c, cfg.episode), ts.meta.synthetic_from)  # fmt: skip
         events = build_events(cycles, signals, cfg.episode)
         return Analysis(signals=signals, cycles=cycles, events=events, flashes=flashes)
 
@@ -215,8 +220,9 @@ class Pipeline:
         return records, log_row, analysis
 
     def info(self) -> dict:
-        """Устройство и фактические веса верификатора — для manifest.json."""
-        return {"device": self.device, "verifier": self.verifier.describe() if self.verifier else None}
+        """Устройство, фактические веса верификатора и модель внешнего вида — для manifest.json."""
+        return {"device": self.device, "verifier": self.verifier.describe() if self.verifier else None,
+                "appearance": self.appearance.describe(self.cfg.appearance) if self.cfg.appearance.enabled else None}  # fmt: skip
 
 
 _worker: Optional[Pipeline] = None  # пайплайн процесса-обработчика (process_clips с workers > 1)

@@ -2,7 +2,8 @@
 
 Цикл «квалифицирован», если в пределах окна 20 с у того же человека есть ещё полный цикл
 (всего >= min_cycles в окне) или у самого цикла есть прямой признак (предмет/дым от верификатора,
-если flash_as_direct — вспышка зажигалки рядом по времени, если vapor_as_direct — выдох пара).
+если flash_as_direct — вспышка зажигалки рядом по времени, если vapor_as_direct — выдох пара,
+если appearance_as_direct — сигарета у рта по CLIP, look).
 Цикл, начавшийся сразу после конца предыдущего (зазор <= min_cycle_gap: конец отвода и начало
 подхода — один отсчёт), считается продолжением того же движения: кисть лишь качнулась от рта
 без паузы вдали. В правиле min_cycles такая пара идёт за один цикл (в debug — joined_prev).
@@ -47,6 +48,10 @@ class Event:
     def vapor(self) -> bool:
         return any(c.vapor for c in self.cycles)
 
+    @property
+    def look(self) -> bool:
+        return any(c.look for c in self.cycles)
+
     def to_dict(self) -> dict:
         return {
             "track_id": self.track_id,
@@ -61,13 +66,15 @@ class Event:
             "direct": self.direct,
             "flash": self.flash,
             "vapor": self.vapor,
+            "look": self.look,
             "reject_reason": self.reject_reason,
         }
 
 
 def has_evidence(c: Cycle, cfg: EpisodeConfig) -> bool:
-    """Прямой признак у цикла: предмет от верификатора, вспышка зажигалки или выдох пара."""
-    return c.direct or (cfg.flash_as_direct and c.flash) or (cfg.vapor_as_direct and c.vapor)
+    """Прямой признак у цикла: предмет от верификатора, вспышка зажигалки, выдох пара или сигарета по CLIP."""
+    return (c.direct or (cfg.flash_as_direct and c.flash) or (cfg.vapor_as_direct and c.vapor)
+            or (cfg.appearance_as_direct and c.look))  # fmt: skip
 
 
 def mark_joined(good: List[Cycle], cfg: EpisodeConfig) -> List[int]:
@@ -110,6 +117,8 @@ def event_confidence(cycles: List[Cycle], cfg: EpisodeConfig) -> float:
         ev = max(ev, cfg.flash_evidence)
     if any(c.vapor for c in cycles):  # пар — тоже, независимо от vapor_as_direct
         ev = max(ev, cfg.vapor_evidence)
+    if any(c.look for c in cycles):  # сигарета по CLIP — тоже, независимо от appearance_as_direct
+        ev = max(ev, cfg.appearance_evidence)
     if ev > 0:
         conf = 1.0 - (1.0 - conf) * (1.0 - cfg.evidence_weight * ev)
     neg = float(np.mean([c.neg_fraction for c in cycles])) if cycles else 0.0

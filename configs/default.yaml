@@ -110,6 +110,20 @@ vapor:                      # выдох пара/дыма у рта после 
   min_kept: 0.3             # кадр годен, если от зоны осталось не меньше этой доли (соседи, край кадра)...
   max_shift: 0.25           # ...и рамка сдвинулась от фона не больше чем на долю высоты
 
+appearance:                 # внешний вид цикла по CLIP (smokedet/appearance.py): курение против питья и касания лица
+  enabled: true
+  model: ViT-L/14@336px     # CLIP (OpenAI), файл весов в weights_dir (tools/prepare_weights.py)
+  weights_dir: weights
+  max_frames: 8             # кадров паузы на цикл
+  mouth_scale: 0.35         # сторона узкого кропа «рот + кисть», доля роста человека
+  wide_scale: 0.7           # сторона широкого кропа (голова, плечи, руки)
+  min_score: 4.0            # цикл с меньшей оценкой без прямого признака — не курение
+  direct_score: 10.0        # оценка не ниже — у рта сигарета (look): прямой признак при episode.appearance_as_direct
+  rescue_score: 12.0        # цикл, отброшенный верификатором за предмет из rescue_objects, с такой оценкой снова валиден
+  rescue_objects: [bottle, water bottle, cup, mug, drinking glass, beverage can, can, jar, glass jar, thermos,
+                   cell phone]  # YOLO-World путает кисть с сигаретой с ними; леденец и еду CLIP сам путает — их нет
+  rescue_reasons: []        # причины отказа при поиске циклов (face_hidden, no_approach, ...), которые тоже отменяет rescue_score
+
 episode:
   window: 20.0              # с: два полных цикла в пределах 20 с
   min_cycles: 2
@@ -127,6 +141,8 @@ episode:
   flash_evidence: 1.0       # вклад вспышки в confidence, доля от полного прямого признака
   vapor_as_direct: true     # выдох пара — прямой признак (1 цикл + пар = эпизод)
   vapor_evidence: 1.0       # вклад пара в confidence, доля от полного прямого признака
+  appearance_as_direct: true  # сигарета по CLIP (look) — прямой признак (1 цикл + look = эпизод)
+  appearance_evidence: 1.0  # вклад look в confidence, доля от полного прямого признака
 
 report:
   team: ""
