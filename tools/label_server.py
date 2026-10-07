@@ -120,9 +120,17 @@ const $=id=>document.getElementById(id);
 $("who").value=localStorage.who||"";$("who").onchange=()=>localStorage.who=$("who").value;
 $("cats").innerHTML=CATS.map((c,i)=>`<button data-c="${c[0]}" onclick="pickCat('${c[0]}')"><kbd>${i+1}</kbd> ${c[1]}</button>`).join("");
 async function load(){const r=await fetch("/api/cycles");const d=await r.json();all=d.cycles;labels=d.labels;refilter(true)}
-function refilter(keep){const f=$("flt").value,cur=list[pos]&&list[pos].id;
- list=all.filter(c=>f=="all"||(f=="todo"&&!labels[c.id])||(f=="valid"&&c.valid)||(f=="rej"&&!c.valid)||(f=="ev"&&c.in_event));
+function filtered(){const f=$("flt").value;
+ return all.filter(c=>f=="all"||(f=="todo"&&!labels[c.id])||(f=="valid"&&c.valid)||(f=="rej"&&!c.valid)||(f=="ev"&&c.in_event))}
+function refilter(keep){const cur=list[pos]&&list[pos].id;list=filtered();
  pos=keep&&cur?Math.max(0,list.findIndex(c=>c.id==cur)):0;show()}
+// циклы выгружаются постепенно: раз в 20 с подтягиваем новые, не прерывая текущий ролик
+async function poll(){try{const d=await (await fetch("/api/cycles")).json();
+ if(d.cycles.length==all.length)return;const wasEmpty=!list.length;all=d.cycles;labels={...d.labels,...labels};
+ const cur=list[pos]&&list[pos].id;list=filtered();const i=list.findIndex(c=>c.id==cur);
+ if(wasEmpty||i<0&&!cur){pos=0;show()}else{pos=Math.max(0,i);
+  $("prog").textContent=`размечено ${Object.keys(labels).length} из ${all.length}; в списке ${list.length}`}}catch(e){}}
+setInterval(poll,20000);
 $("flt").onchange=()=>refilter(false);
 function show(){clearTimeout(timer);const n=Object.keys(labels).length;$("prog").textContent=`размечено ${n} из ${all.length}; в списке ${list.length}`;
  const c=list[pos];if(!c){$("info").innerHTML="Нет циклов в этом фильтре.";$("view").removeAttribute("src");return}
