@@ -135,6 +135,79 @@ def signals_digest(signals: Dict[int, TrackSignal]) -> str:
     return h.hexdigest()
 
 
+def plan_cycle(sig: TrackSignal, c: Cycle, cfg: VaporConfig) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Отсчёты фона (перед подходом руки) и окна замера (вокруг конца паузы) или None, если их мало."""
+    known = ~np.isnan(sig.mouth).any(axis=1)
+    bg_k = np.flatnonzero((sig.t >= c.start - cfg.bg_before) & (sig.t <= c.start - cfg.bg_gap))
+    win_k = np.flatnonzero((sig.t >= c.hold_end - cfg.window_before) & (sig.t <= c.hold_end + cfg.window_after) & known)
+    if len(bg_k) < cfg.bg_min_frames or len(win_k) < 2:
+        return None
+    return bg_k, win_k
+
+
+class CycleFrames:
+    """Кропы одного цикла, накопленные при общем проходе по кадрам клипа, и замер по ним.
+
+    Кроп — общий для всех кадров цикла прямоугольник (зоны у рта и кольца вокруг человека в окне замера),
+    он считается по размеру первого прочитанного кадра. Цикл не замеряется, если не прочитан первый кадр фона."""
+
+    def __init__(self, sig: TrackSignal, c: Cycle, bg_k: np.ndarray, win_k: np.ndarray):
+        self.sig, self.c, self.bg_k, self.win_k = sig, c, bg_k, win_k
+        self.rect: Optional[Rect] = None
+        self.failed = False
+        self.crops: Dict[int, np.ndarray] = {}  # отсчёт сигнала -> кроп
+        self.last = int(max(sig.frame_idx[bg_k[-1]], sig.frame_idx[win_k[-1]]))  # последний нужный кадр
+
+    def add(self, k: int, frame: Optional[np.ndarray], cfg: VaporConfig) -> None:
+        if self.failed:
+            return
+        if frame is None:
+            self.failed = k == self.bg_k[0]
+            return
+        if self.rect is None:
+            h, w = frame.shape[:2]
+            rects = [_zone_rect(self.sig.mouth[j], self.sig.scale[j], cfg, w, h) for j in self.win_k]
+            rects += [_ring_rect(self.sig.boxes[j], w, h) for j in self.win_k]
+            self.rect = min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects), max(r[3] for r in rects)
+            if self.rect[2] - self.rect[0] < 4 or self.rect[3] - self.rect[1] < 4:
+                self.failed = True
+                return
+        x1, y1, x2, y2 = self.rect
+        self.crops[k] = frame[y1:y2, x1:x2].copy()
+
+    def finish(self, others, cfg: VaporConfig) -> Tuple[float, float]:
+        """(чистая дымка, время) по накопленным кропам; кропы освобождаются."""
+        crops, self.crops = self.crops, {}
+        if self.failed or self.rect is None:
+            return np.nan, np.nan
+        sig = self.sig
+        x1, y1 = self.rect[:2]
+        bg_crops = [crops[k] for k in self.bg_k if k in crops]
+        if len(bg_crops) < cfg.bg_min_frames:
+            return np.nan, np.nan
+        bg = np.median(np.stack(bg_crops), axis=0).astype(np.uint8)
+        bg_box = np.median(sig.boxes[self.bg_k], axis=0)
+        bg_center = (bg_box[:2] + bg_box[2:]) / 2
+        bg_others = [b for k in self.bg_k for tid, b in others.get(int(sig.frame_idx[k]), []) if tid != sig.track_id]
+
+        t, net, ok = [], [], []
+        for k in self.win_k:
+            crop = crops.get(k)
+            if crop is None:
+                continue
+            box = sig.boxes[k]
+            near = [b for tid, b in others.get(int(sig.frame_idx[k]), []) if tid != sig.track_id] + bg_others
+            res = measure_frame(crop, bg, (x1, y1), sig.mouth[k], None if sig.face is None else sig.face[k],
+                                sig.hand[k], sig.scale[k], box, near, cfg)  # fmt: skip
+            if res is None:
+                continue
+            moved = float(np.linalg.norm((box[:2] + box[2:]) / 2 - bg_center)) / max(float(box[3] - box[1]), 1.0)
+            t.append(float(sig.t[k]))
+            net.append(res[0])
+            ok.append(res[1] >= cfg.min_kept and moved <= cfg.max_shift)
+        return peak_pair(t, net, ok)
+
+
 class VaporMeter:
     """Замер выдоха для валидных циклов клипа. Результат кэшируется в памяти по циклу, параметрам
     замера и отпечатку сигналов клипа (рот, кисть, нормировка и рамки зависят от секций geometry и
@@ -162,13 +235,8 @@ class VaporMeter:
         digest = signals_digest(signals)
         todo = [c for cs in cycles.values() for c in cs if c.valid and self._key(clip_id, c, cfg, digest) not in self.cache]
         if todo:
-            others = defaultdict(list)  # frame_idx -> [(track_id, рамка)]
-            for tid, sig in signals.items():
-                for f, b in zip(sig.frame_idx, sig.boxes):
-                    others[int(f)].append((tid, b))
-            with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
-                for c in sorted(todo, key=lambda c: c.start):
-                    self.cache[self._key(clip_id, c, cfg, digest)] = self._measure_cycle(reader, signals[c.track_id], c, others, cfg)
+            for c, res in zip(todo, self._measure_cycles(video_path, todo, signals, cfg, synthetic_from)):
+                self.cache[self._key(clip_id, c, cfg, digest)] = res
         for cs in cycles.values():
             for c in cs:
                 if c.valid:
@@ -176,48 +244,41 @@ class VaporMeter:
                     c.vapor = bool(c.vapor_net >= cfg.min_net)
 
     @staticmethod
-    def _measure_cycle(reader: FrameReader, sig: TrackSignal, c: Cycle, others, cfg: VaporConfig) -> Tuple[float, float]:
-        known = ~np.isnan(sig.mouth).any(axis=1)
-        bg_k = np.flatnonzero((sig.t >= c.start - cfg.bg_before) & (sig.t <= c.start - cfg.bg_gap))
-        win_k = np.flatnonzero((sig.t >= c.hold_end - cfg.window_before) & (sig.t <= c.hold_end + cfg.window_after) & known)
-        if len(bg_k) < cfg.bg_min_frames or len(win_k) < 2:
-            return np.nan, np.nan
-        first = reader.get(int(sig.frame_idx[bg_k[0]]), float(sig.t[bg_k[0]]))
-        if first is None:
-            return np.nan, np.nan
-        h, w = first.shape[:2]
-        # общий прямоугольник для всех кадров цикла: зоны у рта и кольца вокруг человека
-        rects = [_zone_rect(sig.mouth[k], sig.scale[k], cfg, w, h) for k in win_k]
-        rects += [_ring_rect(sig.boxes[k], w, h) for k in win_k]
-        x1, y1 = min(r[0] for r in rects), min(r[1] for r in rects)
-        x2, y2 = max(r[2] for r in rects), max(r[3] for r in rects)
-        if x2 - x1 < 4 or y2 - y1 < 4:
-            return np.nan, np.nan
-        crops = []
-        for k in bg_k:
-            frame = first if k == bg_k[0] else reader.get(int(sig.frame_idx[k]), float(sig.t[k]))
-            if frame is not None:
-                crops.append(frame[y1:y2, x1:x2])
-        if len(crops) < cfg.bg_min_frames:
-            return np.nan, np.nan
-        bg = np.median(np.stack(crops), axis=0).astype(np.uint8)
-        bg_box = np.median(sig.boxes[bg_k], axis=0)
-        bg_center = (bg_box[:2] + bg_box[2:]) / 2
-        bg_others = [b for k in bg_k for tid, b in others.get(int(sig.frame_idx[k]), []) if tid != sig.track_id]
-
-        t, net, ok = [], [], []
-        for k in win_k:
-            frame = reader.get(int(sig.frame_idx[k]), float(sig.t[k]))
-            if frame is None:
+    def _measure_cycles(
+        video_path: str,
+        todo: List[Cycle],
+        signals: Dict[int, TrackSignal],
+        cfg: VaporConfig,
+        synthetic_from: Optional[int] = None,
+    ) -> List[Tuple[float, float]]:
+        """(чистая дымка, время) для каждого цикла todo. Кадры всех циклов читаются за один проход по
+        возрастанию номера: переходы назад и seek дороже, чем прочитать файл подряд. Кропы цикла хранятся,
+        пока не прочитан его последний кадр."""
+        others = defaultdict(list)  # frame_idx -> [(track_id, рамка)]
+        for tid, sig in signals.items():
+            for f, b in zip(sig.frame_idx, sig.boxes):
+                others[int(f)].append((tid, b))
+        jobs: List[Optional[CycleFrames]] = []
+        for c in todo:
+            sig = signals[c.track_id]
+            ks = plan_cycle(sig, c, cfg)
+            jobs.append(None if ks is None else CycleFrames(sig, c, *ks))
+        need: Dict[int, List[Tuple[int, int]]] = defaultdict(list)  # кадр -> [(номер цикла в todo, отсчёт)]
+        times: Dict[int, float] = {}  # кадр -> его время у трекера (pts): по нему FrameReader ищет кадр
+        for i, job in enumerate(jobs):
+            if job is None:
                 continue
-            box = sig.boxes[k]
-            near = [b for tid, b in others.get(int(sig.frame_idx[k]), []) if tid != sig.track_id] + bg_others
-            res = measure_frame(frame[y1:y2, x1:x2], bg, (x1, y1), sig.mouth[k],
-                                None if sig.face is None else sig.face[k], sig.hand[k], sig.scale[k], box, near, cfg)  # fmt: skip
-            if res is None:
-                continue
-            moved = float(np.linalg.norm((box[:2] + box[2:]) / 2 - bg_center)) / max(float(box[3] - box[1]), 1.0)
-            t.append(float(sig.t[k]))
-            net.append(res[0])
-            ok.append(res[1] >= cfg.min_kept and moved <= cfg.max_shift)
-        return peak_pair(t, net, ok)
+            for k in np.union1d(job.bg_k, job.win_k):
+                f = int(job.sig.frame_idx[k])
+                need[f].append((i, int(k)))
+                times[f] = float(job.sig.t[k])
+        results: List[Tuple[float, float]] = [(np.nan, np.nan)] * len(jobs)
+        if need:
+            with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
+                for f in sorted(need):
+                    frame = reader.get(f, times[f])
+                    for i, k in need[f]:
+                        jobs[i].add(k, frame, cfg)
+                        if f == jobs[i].last:
+                            results[i] = jobs[i].finish(others, cfg)
+        return results

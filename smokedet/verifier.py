@@ -10,7 +10,7 @@
 треку, а не только в паузах: в паузе детектор принимает палочку за сигарету, а конфету или кружку
 хорошо видно, когда их держат в руке или у рта между циклами.
 
-Детекции кэшируются в памяти по рамке кропа, imgsz и словарю и хранятся с нижним порогом
+Детекции кэшируются в памяти по рамке кропа, imgsz, FP16 и словарю и хранятся с нижним порогом
 уверенности: tune.py перебирает conf, геометрию и списки классов без устаревших результатов.
 Словарь open-vocab модели «запекается» в weights/<модель>-vocab-<хэш>.pt: такой файл грузится
 без текстового энкодера CLIP, поэтому прогон на площадке не требует интернета.
@@ -30,6 +30,7 @@ from .config import VerifierConfig
 from .cycles import Cycle
 from .geometry import TrackSignal
 from .io_video import FrameReader
+from .tracking import half_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ PREDICT_CONF = 0.05  # модель запускается с этим поро�
 
 # детекция в координатах кадра: (класс, уверенность, центр x, центр y)
 Det = Tuple[str, float, float, float]
+# запрос кропа: (кадр, его время у трекера, рамка кропа без обрезки, ключ кэша)
+Request = Tuple[int, float, Optional[Tuple[int, int, int, int]], tuple]
+# кроп кадра и его левый верхний угол в координатах кадра
+Crop = Tuple[np.ndarray, Tuple[int, int]]
 
 
 def raw_box(mouth: np.ndarray, hand: np.ndarray, scale: float, margin: float) -> Optional[Tuple[int, int, int, int]]:
@@ -171,7 +176,7 @@ class ObjectVerifier:
         self.model_path = cfg.model
         self.fallback_path = cfg.fallback_model
         self._load(cfg)
-        # детекции кропа по (clip_id, frame_idx, рамка кропа, imgsz, словарь, порог предсказания)
+        # детекции кропа по (clip_id, frame_idx, рамка кропа, imgsz, FP16, словарь, порог предсказания)
         self.cache: Dict[tuple, List[Det]] = {}
 
     def _load(self, cfg: VerifierConfig) -> None:
@@ -222,11 +227,12 @@ class ObjectVerifier:
             "track_negative_classes": sorted(track),
         }
 
-    def predict(self, crops: List[np.ndarray], imgsz: int, conf: float, batch: int = 16):
+    def predict(self, crops: List[np.ndarray], imgsz: int, conf: float, batch: int = 16, half: bool = False):
         """Для каждого кропа — список (класс, уверенность, xyxy в координатах кропа)."""
         out: List[List[Tuple[str, float, np.ndarray]]] = []
+        fp16 = half_kwargs(half, self.device)
         for i in range(0, len(crops), batch):
-            results = self.model.predict(crops[i : i + batch], imgsz=imgsz, conf=conf, device=self.device, verbose=False)
+            results = self.model.predict(crops[i : i + batch], imgsz=imgsz, conf=conf, device=self.device, verbose=False, **fp16)
             for r in results:
                 dets = []
                 if r.boxes is not None and len(r.boxes):
@@ -237,49 +243,57 @@ class ObjectVerifier:
                 out.append(dets)
         return out
 
-    def _detections(
-        self,
-        clip_id: str,
-        video_path: str,
-        signals: Dict[int, TrackSignal],
-        requests,
-        cfg: VerifierConfig,
-        synthetic_from: Optional[int] = None,
-    ) -> Dict[tuple, List[Det]]:
-        """requests — (track_id, sample_idx, margin). Детекции по каждому запросу; недостающие досчитываются.
-        synthetic_from — см. VideoMeta: с этого кадра время трекера не pts."""
+    def _keys(self, clip_id: str, signals: Dict[int, TrackSignal], requests, cfg: VerifierConfig) -> Dict[tuple, Request]:
+        """requests — (track_id, sample_idx, margin) → (кадр, его время у трекера, рамка кропа, ключ кэша).
+        По времени кадра (pts) FrameReader быстро переходит к нему."""
         pconf = min(PREDICT_CONF, cfg.conf)
         keyed = {}
-        times: Dict[int, float] = {}  # кадр -> его время у трекера (pts): по нему FrameReader ищет кадр
         for tid, k, m in requests:
             sig = signals[tid]
             f = int(sig.frame_idx[k])
-            times[f] = float(sig.t[k])
             box = raw_box(sig.mouth[k], sig.hand[k], sig.scale[k], m)
-            keyed[(tid, k, m)] = (f, box, (clip_id, f, box, cfg.imgsz, self.vocab, pconf))
-        todo = sorted({v for v in keyed.values() if v[2] not in self.cache}, key=lambda v: (v[0], str(v[1])))
-        if todo:
-            crops, keys, offsets = [], [], []
-            with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
-                frame_cache: Optional[Tuple[int, np.ndarray]] = None
-                for frame_idx, box, key in todo:
-                    if frame_cache is None or frame_cache[0] != frame_idx:
-                        frame_cache = (frame_idx, reader.get(frame_idx, times[frame_idx]))
-                    frame = frame_cache[1]
-                    clipped = None if frame is None else clip_box(frame.shape, box)
-                    if clipped is None:
-                        self.cache[key] = []
-                        continue
-                    x1, y1, x2, y2 = clipped
-                    crops.append(frame[y1:y2, x1:x2].copy())
-                    keys.append(key)
-                    offsets.append((x1, y1))
-            for key, (ox, oy), dets in zip(keys, offsets, self.predict(crops, cfg.imgsz, pconf)):
-                self.cache[key] = [
-                    (name, conf, float((xyxy[0] + xyxy[2]) / 2 + ox), float((xyxy[1] + xyxy[3]) / 2 + oy))
-                    for name, conf, xyxy in dets
-                ]
-        return {req: self.cache[v[2]] for req, v in keyed.items()}
+            keyed[(tid, k, m)] = (f, float(sig.t[k]), box, (clip_id, f, box, cfg.imgsz, cfg.half, self.vocab, pconf))
+        return keyed
+
+    def _read_crops(self, video_path: str, items, synthetic_from: Optional[int] = None) -> Dict[tuple, Crop]:
+        """Кропы для ключей, которых нет в кэше, за один проход по видео; items — значения _keys().
+        Кроп вне кадра сразу даёт пустой результат в кэше. synthetic_from — см. VideoMeta."""
+        todo = sorted({v for v in items if v[3] not in self.cache}, key=lambda v: (v[0], str(v[2])))
+        crops: Dict[tuple, Crop] = {}
+        if not todo:
+            return crops
+        with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
+            frame_cache: Optional[Tuple[int, np.ndarray]] = None
+            for frame_idx, t, box, key in todo:
+                if frame_cache is None or frame_cache[0] != frame_idx:
+                    frame_cache = (frame_idx, reader.get(frame_idx, t))
+                frame = frame_cache[1]
+                clipped = None if frame is None else clip_box(frame.shape, box)
+                if clipped is None:
+                    self.cache[key] = []
+                    continue
+                x1, y1, x2, y2 = clipped
+                crops[key] = (frame[y1:y2, x1:x2].copy(), (x1, y1))
+        return crops
+
+    def _predict(self, items, crops: Dict[tuple, Crop], cfg: VerifierConfig) -> None:
+        """Досчитывает детекции для ключей items, которых нет в кэше; использованные кропы освобождаются."""
+        todo = sorted({(f, box, key) for f, _, box, key in items if key not in self.cache}, key=lambda v: (v[0], str(v[1])))
+        keys = [key for _, _, key in todo if key in crops]
+        if not keys:
+            return
+        batch = [crops.pop(key) for key in keys]
+        found = self.predict([crop for crop, _ in batch], cfg.imgsz, min(PREDICT_CONF, cfg.conf), half=cfg.half)
+        for key, (_, (ox, oy)), dets in zip(keys, batch, found):
+            self.cache[key] = [
+                (name, conf, float((xyxy[0] + xyxy[2]) / 2 + ox), float((xyxy[1] + xyxy[3]) / 2 + oy))
+                for name, conf, xyxy in dets
+            ]
+
+    @staticmethod
+    def _scan_plan(cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], cfg: VerifierConfig) -> Dict[int, List[int]]:
+        """Отсчёты трека для поиска предметов у кисти или рта — только у людей с валидными циклами."""
+        return {tid: scan_indices(signals[tid], cfg.track_scan_step) for tid, cs in cycles.items() if any(c.valid for c in cs)}
 
     def verify(
         self,
@@ -299,30 +313,40 @@ class ObjectVerifier:
             for tid, track_cycles in cycles.items() for c in track_cycles if c.valid
         ]  # fmt: skip
         requests = {(tid, k, m) for tid, _, ks in plan for k in ks for m in margins}
-        dets = self._detections(clip_id, video_path, signals, requests, cfg, synthetic_from)
-        for tid, c, ks in plan:
-            frames = [merge_detections([best_by_class(dets[(tid, k, m)], cfg.conf) for m in margins]) for k in ks]
-            self._aggregate(c, frames, cfg)
         groups = track_groups(cfg, set(self.names.values()))
-        if groups and cfg.track_scan_step > 0:
-            self._scan_tracks(clip_id, video_path, cycles, signals, cfg, margins, groups, synthetic_from)
+        scan = bool(groups) and cfg.track_scan_step > 0
+        # кадры для просмотра треков читаются в том же проходе по видео, что и кадры пауз, — у всех людей
+        # с валидными до проверки пауз циклами; детектор по треку запускается только у оставшихся
+        scan_plan = self._scan_plan(cycles, signals, cfg) if scan else {}
+        scan_requests = {(tid, k, m) for tid, ks in scan_plan.items() for k in ks for m in margins}
+        keyed = self._keys(clip_id, signals, requests | scan_requests, cfg)
+        crops = self._read_crops(video_path, keyed.values(), synthetic_from)
+        self._predict([keyed[r] for r in requests], crops, cfg)
+        for tid, c, ks in plan:
+            frames = [
+                merge_detections([best_by_class(self.cache[keyed[(tid, k, m)][3]], cfg.conf) for m in margins]) for k in ks
+            ]
+            self._aggregate(c, frames, cfg)
+        if scan:
+            self._scan_tracks(clip_id, cycles, signals, cfg, margins, groups, keyed, crops)
 
     def _scan_tracks(
         self,
         clip_id: str,
-        video_path: str,
         cycles: Dict[int, List[Cycle]],
         signals: Dict[int, TrackSignal],
         cfg: VerifierConfig,
         margins: List[float],
         groups: List[TrackGroup],
-        synthetic_from: Optional[int] = None,
+        keyed: Dict[tuple, Request],
+        crops: Dict[tuple, Crop],
     ) -> None:
         """Ищет «двойников» сигареты и предметы для питья у кисти или рта по всему треку
-        (только у людей с валидными циклами)."""
-        plan = {tid: scan_indices(signals[tid], cfg.track_scan_step) for tid, cs in cycles.items() if any(c.valid for c in cs)}
-        requests = {(tid, k, m) for tid, ks in plan.items() for k in ks for m in margins}
-        dets = self._detections(clip_id, video_path, signals, requests, cfg, synthetic_from)
+        (только у людей с валидными циклами). keyed и crops — запросы и кропы, прочитанные в verify()."""
+        plan = self._scan_plan(cycles, signals, cfg)
+        requests = [(tid, k, m) for tid, ks in plan.items() for k in ks for m in margins]
+        self._predict([keyed[r] for r in requests], crops, cfg)
+        dets = {r: self.cache[keyed[r][3]] for r in requests}
         for tid, ks in plan.items():
             sig = signals[tid]
             for g in groups:

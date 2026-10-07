@@ -1,6 +1,8 @@
 """Чтение видео: метаданные, проход с шагом, чтение отдельных кадров по индексу."""
 from __future__ import annotations
 
+import queue
+import threading
 from dataclasses import dataclass
 from typing import Iterator, Optional, Tuple
 
@@ -81,11 +83,63 @@ class FrameClock:
         return t
 
 
+PREFETCH = 8  # кадров вперёд при проходе трекера (1080p — ~6 МБ на кадр)
+_END = object()  # конец потока в очереди prefetched
+
+
+def prefetched(items: Iterator, size: int) -> Iterator:
+    """Отдаёт элементы items, заранее читая до size штук в фоновом потоке: декодирование видео идёт
+    одновременно с инференсом (OpenCV отпускает GIL). Исключение потока передаётся читателю; при досрочном
+    выходе поток останавливается, а генератор items закрывается в нём же."""
+    q: queue.Queue = queue.Queue(maxsize=max(1, size))
+    stop = threading.Event()
+
+    def put(item) -> bool:
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def work() -> None:
+        try:
+            for item in items:
+                if not put((item, None)):
+                    return
+            put((_END, None))
+        except BaseException as e:  # noqa: BLE001 — передаётся в основной поток
+            put((_END, e))
+        finally:
+            close = getattr(items, "close", None)
+            if close is not None:
+                close()
+
+    thread = threading.Thread(target=work, name="frame-prefetch", daemon=True)
+    thread.start()
+    try:
+        while True:
+            item, err = q.get()
+            if item is _END:
+                if err is not None:
+                    raise err
+                return
+            yield item
+    finally:
+        stop.set()
+        thread.join()
+
+
 def iter_sampled_frames(
-    path: str, stride: int, fps: float, clock: Optional[FrameClock] = None
+    path: str, stride: int, fps: float, clock: Optional[FrameClock] = None, prefetch: int = PREFETCH
 ) -> Iterator[Tuple[int, float, np.ndarray]]:
     """Отдаёт (индекс кадра, время, с; кадр) для каждого stride-го кадра; пропущенные кадры только grab().
-    clock — свои часы, чтобы после прохода узнать, с какого кадра время не по pts."""
+    clock — свои часы, чтобы после прохода узнать, с какого кадра время не по pts (они идут в потоке
+    чтения, но к концу прохода поток завершён). prefetch > 0 — читать кадры заранее в фоновом потоке."""
+    if prefetch > 0:
+        yield from prefetched(iter_sampled_frames(path, stride, fps, clock, prefetch=0), prefetch)
+        return
     cap = _open(path)
     clock = clock or FrameClock(fps)
     idx = 0

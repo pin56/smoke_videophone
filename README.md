@@ -71,8 +71,11 @@ python run.py --input data/clip.mp4 --camera-id cam_fountain --start-time 2026-1
 Набор клипов (скрытый набор — **одна команда**):
 
 ```bash
-python run.py --inputs data/hidden.csv --out runs/final
+python run.py --inputs data/hidden.csv --out runs/final --workers 2
 ```
+
+`--workers N` — клипы параллельно, каждый в своём процессе со своими моделями (на GPU с 6 ГБ — 2;
+на CPU/MPS выигрыша обычно нет). По умолчанию 1.
 
 `hidden.csv` (пути — относительно CSV; `clip_id`, `start_time`, `roi` необязательны):
 
@@ -127,7 +130,7 @@ python tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
 
 1. Подобрать пороги на эталоне (`tune.py`), записать лучшие в `configs/default.yaml`.
 2. Закоммитить код и конфиг (в `manifest.json` попадёт коммит без `-dirty`).
-3. `python run.py --inputs data/hidden.csv --out runs/final` → сдать `manifest.json`, `predictions.csv`, архив с кодом.
+3. `python run.py --inputs data/hidden.csv --out runs/final --workers 2` → сдать `manifest.json`, `predictions.csv`, архив с кодом.
 4. После фиксации порог, постобработку и предсказания не менять.
 
 ## Скорость (MacBook, Apple Silicon, MPS, кадр 1920×1080, только поза + трекинг)
@@ -139,6 +142,23 @@ python tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
 
 При анализе 10 кадр/с конфигурация по умолчанию работает примерно в реальном времени (×0.8).
 Быстрее: `--set detector.pose_model=weights/yolo11s-pose.pt --set detector.imgsz=960` или `--set video.target_fps=6`.
+
+## Скорость (Windows, RTX 2060 6 ГБ, CUDA, кадр 1920×1080, yolo11m-pose, imgsz 1280)
+
+Трекинг одного клипа (66 с, 662 кадра анализа):
+
+| Режим | кадр/с |
+|---|---|
+| FP32 (`--set detector.half=false`) | 19.1 |
+| FP16 (по умолчанию) | 31.2 |
+| FP16 + чтение кадров в фоновом потоке (по умолчанию) | 32.5 |
+
+Весь пайплайн на 4 клипах (312 с видео, без кэша; на GPU параллельно шла другая задача, цифры завышены):
+до ускорения — 448 с, FP16 + один проход чтения в лёгкой стадии — 311 с (×1.44), то же с `--workers 2` — 248 с
+(×1.81). FP16 верификатора ускоряет лёгкую стадию примерно на 30 %, чтение за один проход — ещё на ~8 %.
+
+FP16 немного сдвигает точки позы и уверенности верификатора: пограничные циклы и границы событий меняются.
+Пороги подбирайте в том же режиме, в каком будет финальный прогон.
 
 ## Тесты
 

@@ -182,7 +182,8 @@ def test_vapor_cache_depends_on_signals(monkeypatch):
 
     calls = []
     monkeypatch.setattr(vap, "FrameReader", FakeReader)
-    monkeypatch.setattr(VaporMeter, "_measure_cycle", lambda self, r, sig, c, o, cfg: calls.append(1) or (0.0, 0.0))
+    monkeypatch.setattr(VaporMeter, "_measure_cycles",
+                        lambda self, path, todo, signals, cfg, sf=None: calls.append(1) or [(0.0, 0.0)] * len(todo))  # fmt: skip
     meter, cfg = VaporMeter(), VaporConfig()
     cycles, signals = _setup()
     meter.measure("c", "v.mp4", cycles, signals, cfg)
