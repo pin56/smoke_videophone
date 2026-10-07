@@ -10,7 +10,7 @@ import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -161,7 +161,10 @@ class PoseTracker:
             if rk[:11, 2].mean() > kpts[i, :11, 2].mean():
                 kpts[i] = rk
 
-    def run(self, meta: VideoMeta, stride: int, progress: bool = True) -> TrackSet:
+    def run(
+        self, meta: VideoMeta, stride: int, progress: bool = True, on_progress: Optional[Callable[[int, Optional[int]], None]] = None
+    ) -> TrackSet:
+        """on_progress(обработано кадров, всего или None) вызывается после каждого кадра (веб-интерфейс)."""
         from .flash import LightMeter  # flash → geometry → tracking: импорт здесь, иначе цикл
 
         meter = LightMeter()
@@ -183,6 +186,8 @@ class PoseTracker:
             res = self._track_frame(frame, first=n_processed == 0)
             n_processed += 1
             last_idx = frame_idx
+            if on_progress is not None:
+                on_progress(n_processed, total)
             if res.boxes is None or res.boxes.id is None or len(res.boxes) == 0:
                 meter.measure(frame, t, [], [])  # фон обновляется и на кадрах без людей
                 continue
