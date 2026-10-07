@@ -93,6 +93,8 @@ class Roi:
     def contains(self, x: float, y: float) -> bool:
         if self.mask is None:
             return True
+        if not (np.isfinite(x) and np.isfinite(y)):
+            return False
         h, w = self.mask.shape
         xi = int(min(max(x, 0), w - 1))
         yi = int(min(max(y, 0), h - 1))

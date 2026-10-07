@@ -286,6 +286,7 @@ def test_roi_polygons(tmp_path):
                                 "frame_size": [100, 100]}))  # fmt: skip
     scaled = Roi.load(str(path), 200, 200)
     assert scaled.contains(90, 90) and not scaled.contains(110, 110)
+    assert not roi.contains(float("nan"), 10) and not roi.contains(10, float("inf"))
 
 
 def test_config_roundtrip():
