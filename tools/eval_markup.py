@@ -205,15 +205,25 @@ def evaluate_run(gt: Dict[str, ClipGT], run: Dict[str, RunClip], run_dir: str = 
     rep = evaluate(preds, gts, durations, params)
     folder = {stem: rc.folder for stem, rc in included.items()}
 
+    matched = [(m["clip_id"], m["gt_start"], m["gt_end"]) for m in rep["matches"] if m["result"] == "TP"]
     for m in rep["matches"]:
         stem = m["clip_id"]
         m["folder"] = folder[stem]
         m["clip"] = included[stem].clip_id
         if m["result"] == "FP":
+            # второе предсказание на уже сопоставленный эпизод: по протоколу FP, но в разметке нет личности,
+            # и отметки разных людей слиты в один эпизод — считается отдельно (dup)
+            dup = next(((a, b) for st, a, b in matched if st == stem and overlap(a - params.gt_expand, b + params.gt_expand,
+                        m["pred_start"], m["pred_end"]) >= params.min_overlap), None)  # fmt: skip
+            m["dup"] = dup is not None
             s, e = m["pred_start"] - params.gt_expand, m["pred_end"] + params.gt_expand
             hits = [(a, b) for a, b in (gt[stem].nosmoke if stem in gt else []) if overlap(s, e, a, b) > 0]
-            m["note"] = (SCENARIO.get(stem, "не курит") + ": " + ", ".join(f"{a:g}–{b:g}" for a, b in hits)) if hits else \
-                ("без NOSMOKE-отметки рядом" if folder[stem] in NEGATIVE_FOLDERS else "клип с курением, вне эпизодов")
+            if dup:
+                m["note"] = f"дубль: второе предсказание на эпизод {dup[0]:g}–{dup[1]:g}"
+            elif hits:
+                m["note"] = SCENARIO.get(stem, "не курит") + ": " + ", ".join(f"{a:g}–{b:g}" for a, b in hits)
+            else:
+                m["note"] = "без NOSMOKE-отметки рядом" if folder[stem] in NEGATIVE_FOLDERS else "клип с курением, вне эпизодов"
         elif m["result"] == "FN":
             n = next(it.row["n_marks"] for it in gts if it.label == "POSITIVE" and it.clip_id == stem and it.start == m["gt_start"])
             m["gt_marks"] = n
@@ -224,12 +234,13 @@ def evaluate_run(gt: Dict[str, ClipGT], run: Dict[str, RunClip], run_dir: str = 
         tp = sum(1 for m in rep["matches"] if m["result"] == "TP" and cond(m["clip_id"]))
         fp = sum(1 for m in rep["matches"] if m["result"] == "FP" and cond(m["clip_id"]))
         fn = sum(1 for m in rep["matches"] if m["result"] == "FN" and cond(m["clip_id"]))
-        p = tp / (tp + fp) if tp + fp else 0.0
-        r = tp / (tp + fn) if tp + fn else 0.0
+        dup = sum(1 for m in rep["matches"] if m["result"] == "FP" and m["dup"] and cond(m["clip_id"]))
         hours = sum(rc.duration for st, rc in included.items() if cond(st)) / 3600.0
-        return {"tp": tp, "fp": fp, "fn": fn, "precision": p, "recall": r, "f1": 2 * p * r / (p + r) if p + r else 0.0,
-                "hours": hours, "fp_per_hour": fp / hours if hours else None}  # fmt: skip
+        p, r, f1 = prf(tp, fp, fn)
+        return {"tp": tp, "fp": fp, "fn": fn, "precision": p, "recall": r, "f1": f1, "dup": dup,
+                "f1_nodup": prf(tp, fp - dup, fn)[2], "hours": hours, "fp_per_hour": fp / hours if hours else None}  # fmt: skip
 
+    total = subset(lambda st: True)
     per_folder = {fo: subset(lambda st, fo=fo: folder[st] == fo) for fo in sorted(set(folder.values()))}
     per_clip = []
     for stem in sorted(included, key=lambda st: (folder[st], st)):
@@ -240,8 +251,14 @@ def evaluate_run(gt: Dict[str, ClipGT], run: Dict[str, RunClip], run_dir: str = 
                          "preds": len(included[stem].preds), "TP": cnt["TP"], "FN": cnt["FN"], "FP": cnt["FP"],
                          "ignored": cnt["IGNORED"]})  # fmt: skip
     single = [(st, s, e) for st, g in gt.items() if st in included for s, e, n in g.episodes if n == 1]
-    return {"overall": rep, "per_folder": per_folder, "per_clip": per_clip, "excluded": sorted(excluded),
+    return {"overall": rep, "total": total, "per_folder": per_folder, "per_clip": per_clip, "excluded": sorted(excluded),
             "missing": missing, "single_mark_episodes": single}  # fmt: skip
+
+
+def prf(tp: int, fp: int, fn: int) -> Tuple[float, float, float]:
+    p = tp / (tp + fp) if tp + fp else 0.0
+    r = tp / (tp + fn) if tp + fn else 0.0
+    return p, r, 2 * p * r / (p + r) if p + r else 0.0
 
 
 def _f(v, spec=".3f") -> str:
@@ -252,7 +269,8 @@ def summary_md(name: str, res: dict) -> str:
     o = res["overall"]
     lines = [f"### {name}", "",
              f"P {_f(o['precision'])}  R {_f(o['recall'])}  F1 {_f(o['f1'])}  —  TP {o['tp']}, FP {o['fp']}, FN {o['fn']}, "
-             f"в IGNORE {o['ignored_preds']}; FP/ч вне эпизодов и IGNORE {_f(o['fp_per_hour'], '.2f')}", "",
+             f"в IGNORE {o['ignored_preds']}; FP/ч вне эпизодов и IGNORE {_f(o['fp_per_hour'], '.2f')}; "
+             f"из FP дублей эпизода {res['total']['dup']} (F1 без них {_f(res['total']['f1_nodup'])})", "",
              "| папка | TP | FP | FN | P | R | F1 | часов | FP/ч |", "|---|---|---|---|---|---|---|---|---|"]  # fmt: skip
     for fo, s in res["per_folder"].items():
         lines.append(f"| {fo} | {s['tp']} | {s['fp']} | {s['fn']} | {_f(s['precision'])} | {_f(s['recall'])} | "
@@ -275,7 +293,7 @@ def summary_md(name: str, res: dict) -> str:
 def write_outputs(out: Path, name: str, res: dict) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.md").write_text(summary_md(name, res) + "\n", encoding="utf-8")
-    cols = ["result", "folder", "clip_id", "clip", "gt_start", "gt_end", "gt_marks", "gt_label", "gt_scenario",
+    cols = ["result", "dup", "folder", "clip_id", "clip", "gt_start", "gt_end", "gt_marks", "gt_label", "gt_scenario",
             "pred_event_id", "pred_track", "pred_start", "pred_end", "pred_conf", "note"]  # fmt: skip
     with open(out / "matches.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
@@ -310,9 +328,11 @@ def main(argv=None) -> int:
         o = res["overall"]
         neg = res["per_folder"].get("false", {})
         rows.append(f"| {name} | {_f(o['precision'])} | {_f(o['recall'])} | {_f(o['f1'])} | {o['tp']} | {o['fp']} | {o['fn']} "
-                    f"| {neg.get('fp', '—')} | {_f(neg.get('fp_per_hour'), '.1f')} |")  # fmt: skip
+                    f"| {res['total']['dup']} | {_f(res['total']['f1_nodup'])} | {neg.get('fp', '—')} "
+                    f"| {_f(neg.get('fp_per_hour'), '.1f')} |")  # fmt: skip
         print(summary_md(name, res) + "\n")
-    print("| прогон | P | R | F1 | TP | FP | FN | FP в false | FP/ч в false |\n|---|---|---|---|---|---|---|---|---|")
+    print("| прогон | P | R | F1 | TP | FP | FN | дублей | F1 без дублей | FP в false | FP/ч в false |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|")
     print("\n".join(rows))
     return 0
 

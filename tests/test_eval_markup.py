@@ -103,3 +103,12 @@ def test_evaluate_run(tmp_path):
     assert res["single_mark_episodes"] == [("sm_1", 341, 341)]
     em.write_outputs(tmp_path / "out", "run", res)
     assert "FN" in (tmp_path / "out" / "summary.md").read_text(encoding="utf-8")
+
+
+def test_duplicate_prediction(tmp_path):
+    gt = tmp_path / "gt.csv"
+    write_csv(gt, GT_COLS, [["sm_3", "true", "x", "SMOKE", 48, 49, 51], ["sm_3", "true", "x", "SMOKE", 59, 60, 62]])
+    run = make_run(tmp_path, [("a", "Z:/v/true/sm_3.mp4", 117.0)], [("a", 47.0, 52.0), ("a", 58.0, 63.0)])
+    res = em.evaluate_run(em.load_gt(str(gt)), em.load_run(str(run)))
+    assert (res["total"]["tp"], res["total"]["fp"], res["total"]["dup"]) == (1, 1, 1)
+    assert res["total"]["f1_nodup"] == 1.0
