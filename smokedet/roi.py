@@ -5,6 +5,8 @@
     {"polygons": [[[x, y], ...], ...]}
     [[x, y], [x, y], ...]                      # один полигон
 Координаты в пикселях исходного кадра или (normalized: true / все <= 1) в долях кадра.
+Необязательный "frame_size": [w, h] (пишет tools/draw_roi.py) — размер кадра, на котором размечены пиксели:
+на видео другого разрешения полигоны масштабируются, как и PNG-маска.
 """
 from __future__ import annotations
 
@@ -46,7 +48,15 @@ class Roi:
                 data = {"include": data}
             include = _as_polygons(data.get("include") or data.get("polygons"))
             exclude = _as_polygons(data.get("exclude"))
-            return cls.from_polygons(include, exclude, width, height, data.get("normalized"))
+            normalized, size = data.get("normalized"), data.get("frame_size")
+            if size and not normalized:
+                kx, ky = width / float(size[0]), height / float(size[1])
+
+                def rescale(polys: List[Polygon]) -> List[Polygon]:
+                    return [[[x * kx, y * ky] for x, y in poly] for poly in polys]
+
+                include, exclude, normalized = rescale(include), rescale(exclude), False
+            return cls.from_polygons(include, exclude, width, height, normalized)
         img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise IOError(f"Не удалось прочитать маску ROI: {path}")

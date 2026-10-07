@@ -281,6 +281,11 @@ def test_roi_polygons(tmp_path):
     assert roi.contains(10, 10) and not roi.contains(50, 50) and not roi.contains(150, 150)
     norm = Roi.from_polygons([[[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]]], [], 200, 200)
     assert norm.contains(90, 90) and not norm.contains(110, 110)
+    # разметка tools/draw_roi.py на кадре 100x100, видео 200x200: полигон растягивается, как PNG-маска
+    path.write_text(json.dumps({"include": [[[0, 0], [50, 0], [50, 50], [0, 50]]], "normalized": False,
+                                "frame_size": [100, 100]}))  # fmt: skip
+    scaled = Roi.load(str(path), 200, 200)
+    assert scaled.contains(90, 90) and not scaled.contains(110, 110)
 
 
 def test_config_roundtrip():
@@ -292,6 +297,19 @@ def test_config_roundtrip():
     assert with_overrides(cfg, ["cycle.near_enter=0.5"]).cycle.near_enter == 0.5
     with pytest.raises(KeyError):
         load_config(None, ["cycle.unknown=1"])
+
+
+def test_config_override_types(tmp_path):
+    cfg = load_config(None, ["detector.device=0", "verifier.positive_classes=cigarette", "cycle.max_hold=5",
+                             "report.team=2026", "flash.enabled=false"])  # fmt: skip
+    assert cfg.detector.device == "0"  # не число 0: select_device принял бы его за auto
+    assert cfg.verifier.positive_classes == ["cigarette"]
+    assert cfg.cycle.max_hold == 5.0 and isinstance(cfg.cycle.max_hold, float)
+    assert cfg.report.team == "2026"
+    assert cfg.flash.enabled is False
+    empty = tmp_path / "c.yaml"
+    empty.write_text("cycle:\n", encoding="utf-8")  # секция без параметров
+    assert load_config(str(empty), ["cycle.near_enter=0.5"]).cycle.near_enter == 0.5
 
 
 def _face_kpts():

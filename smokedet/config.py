@@ -215,12 +215,32 @@ class Config:
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def _coerce(default: Any, value: Any) -> Any:
+    """Приводит значение из YAML или --set к типу значения по умолчанию: YAML читает «--set detector.device=0»
+    как число 0 (select_device счёл бы его «auto»), а «verifier.positive_classes=cigarette» — как строку
+    (словарь верификатора разобрал бы её по буквам)."""
+    if value is None or isinstance(default, bool):
+        return value
+    if isinstance(default, str) and isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(default, float) and isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(default, list) and isinstance(value, str):
+        return [value]
+    return value
+
+
 def _section_from_dict(cls, data: Dict[str, Any]):
-    names = {f.name for f in dataclasses.fields(cls)}
-    unknown = set(data) - names
+    fields = {f.name: f for f in dataclasses.fields(cls)}
+    unknown = set(data) - set(fields)
     if unknown:
         raise KeyError(f"Неизвестные параметры в секции {cls.__name__}: {sorted(unknown)}")
-    return cls(**data)
+    values = {}
+    for name, value in data.items():
+        f = fields[name]
+        default = f.default_factory() if f.default is dataclasses.MISSING else f.default
+        values[name] = _coerce(default, value)
+    return cls(**values)
 
 
 def config_from_dict(data: Dict[str, Any]) -> Config:
@@ -241,7 +261,8 @@ def apply_overrides(data: Dict[str, Any], overrides: List[str]) -> Dict[str, Any
         if len(parts) != 2:
             raise ValueError(f"Ключ должен быть вида секция.параметр: {key}")
         section, name = parts
-        data.setdefault(section, {})
+        if not isinstance(data.get(section), dict):  # «cycle:» без параметров в YAML — это None
+            data[section] = {}
         data[section][name] = yaml.safe_load(raw)
     return data
 

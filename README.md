@@ -89,6 +89,9 @@ cam1_001.mp4,cam_fountain,cam1_001,2026-10-09T12:00:00,roi_fountain.json
 python tools/draw_roi.py --video data/clip.mp4 --out data/roi_fountain.json
 ```
 
+Пиксельные полигоны из `draw_roi.py` хранят размер кадра (`frame_size`): на видео другого разрешения той же камеры
+они масштабируются, как и PNG-маска.
+
 ## Выход (`--out`)
 
 | Файл | Содержимое |

@@ -156,8 +156,9 @@ class VaporMeter:
         cycles: Dict[int, List[Cycle]],
         signals: Dict[int, TrackSignal],
         cfg: VaporConfig,
+        synthetic_from: Optional[int] = None,
     ) -> None:
-        """Заполняет у валидных циклов поля vapor / vapor_net / vapor_t."""
+        """Заполняет у валидных циклов поля vapor / vapor_net / vapor_t. synthetic_from — см. VideoMeta."""
         digest = signals_digest(signals)
         todo = [c for cs in cycles.values() for c in cs if c.valid and self._key(clip_id, c, cfg, digest) not in self.cache]
         if todo:
@@ -165,7 +166,7 @@ class VaporMeter:
             for tid, sig in signals.items():
                 for f, b in zip(sig.frame_idx, sig.boxes):
                     others[int(f)].append((tid, b))
-            with FrameReader(video_path) as reader:
+            with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
                 for c in sorted(todo, key=lambda c: c.start):
                     self.cache[self._key(clip_id, c, cfg, digest)] = self._measure_cycle(reader, signals[c.track_id], c, others, cfg)
         for cs in cycles.values():
@@ -181,7 +182,7 @@ class VaporMeter:
         win_k = np.flatnonzero((sig.t >= c.hold_end - cfg.window_before) & (sig.t <= c.hold_end + cfg.window_after) & known)
         if len(bg_k) < cfg.bg_min_frames or len(win_k) < 2:
             return np.nan, np.nan
-        first = reader.get(int(sig.frame_idx[bg_k[0]]))
+        first = reader.get(int(sig.frame_idx[bg_k[0]]), float(sig.t[bg_k[0]]))
         if first is None:
             return np.nan, np.nan
         h, w = first.shape[:2]
@@ -194,7 +195,7 @@ class VaporMeter:
             return np.nan, np.nan
         crops = []
         for k in bg_k:
-            frame = first if k == bg_k[0] else reader.get(int(sig.frame_idx[k]))
+            frame = first if k == bg_k[0] else reader.get(int(sig.frame_idx[k]), float(sig.t[k]))
             if frame is not None:
                 crops.append(frame[y1:y2, x1:x2])
         if len(crops) < cfg.bg_min_frames:
@@ -206,7 +207,7 @@ class VaporMeter:
 
         t, net, ok = [], [], []
         for k in win_k:
-            frame = reader.get(int(sig.frame_idx[k]))
+            frame = reader.get(int(sig.frame_idx[k]), float(sig.t[k]))
             if frame is None:
                 continue
             box = sig.boxes[k]

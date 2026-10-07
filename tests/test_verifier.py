@@ -68,7 +68,7 @@ class FakeYOLO:
 
 
 class FakeReader:
-    def __init__(self, path):
+    def __init__(self, path, **kwargs):
         pass
 
     def __enter__(self):
@@ -77,7 +77,7 @@ class FakeReader:
     def __exit__(self, *exc):
         pass
 
-    def get(self, idx):
+    def get(self, idx, t=None):
         return np.zeros((480, 640, 3), np.uint8)
 
 

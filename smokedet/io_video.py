@@ -15,6 +15,9 @@ class VideoMeta:
     frame_count: int
     width: int
     height: int
+    # с этого кадра время трекера — idx/fps со сдвигом, а не pts (FrameClock); None — везде pts.
+    # Заполняет трекер; в кэше треков старых версий поля нет, там действует значение по умолчанию
+    synthetic_from: Optional[int] = None
 
     @property
     def duration(self) -> float:
@@ -62,6 +65,7 @@ class FrameClock:
         self.fps = fps
         self.offset: Optional[float] = None  # не None — pts отброшен, время = idx/fps + offset
         self.last = -1.0
+        self.synthetic_from: Optional[int] = None  # первый кадр с временем не по pts
 
     def time(self, idx: int, pos_msec: float) -> float:
         nominal = idx / self.fps
@@ -71,15 +75,19 @@ class FrameClock:
                 self.last = t
                 return t
             self.offset = max(self.last, 0.0) - (idx - 1) / self.fps if idx > 0 else 0.0
+            self.synthetic_from = idx
         t = max(nominal + self.offset, self.last + 1e-3)
         self.last = t
         return t
 
 
-def iter_sampled_frames(path: str, stride: int, fps: float) -> Iterator[Tuple[int, float, np.ndarray]]:
-    """Отдаёт (индекс кадра, время, с; кадр) для каждого stride-го кадра; пропущенные кадры только grab()."""
+def iter_sampled_frames(
+    path: str, stride: int, fps: float, clock: Optional[FrameClock] = None
+) -> Iterator[Tuple[int, float, np.ndarray]]:
+    """Отдаёт (индекс кадра, время, с; кадр) для каждого stride-го кадра; пропущенные кадры только grab().
+    clock — свои часы, чтобы после прохода узнать, с какого кадра время не по pts."""
     cap = _open(path)
-    clock = FrameClock(fps)
+    clock = clock or FrameClock(fps)
     idx = 0
     try:
         while True:
@@ -98,17 +106,41 @@ def iter_sampled_frames(path: str, stride: int, fps: float) -> Iterator[Tuple[in
 
 
 class FrameReader:
-    """Случайный доступ к кадрам. Близкие кадры дочитываются вперёд, дальние — через seek."""
+    """Случайный доступ к кадрам по последовательному индексу — тому же, что у iter_sampled_frames.
 
-    def __init__(self, path: str, max_forward: int = 90):
+    Близкие кадры дочитываются вперёд. Seek по CAP_PROP_POS_FRAMES не годится: OpenCV считает номер кадра
+    по pts (pts * fps), и в CCTV-файлах с переменным fps попадает на кадр, сдвинутый от последовательного
+    индекса на величину дрейфа (на клипе Гатчины — до 6 кадров). Поэтому дальний переход делается по времени
+    кадра t, которое записал трекер (FrameClock, это pts): seek чуть раньше и чтение вперёд до кадра с тем же
+    pts. Синтетическое время (кадры от synthetic_from, см. VideoMeta) может случайно совпасть с pts другого
+    кадра, поэтому для них, без t или если кадр с таким pts не найден, кадры читаются подряд, назад — с начала
+    файла.
+    """
+
+    SEEK_BACK = 1.0  # с: seek по времени раньше нужного кадра на столько
+    SEEK_MAX_FRAMES = 500  # дальше от точки seek кадр с нужным pts не ищется
+    PTS_TOL = 1e-6  # с: pts и время трекера считаются одной формулой, совпадают точно
+
+    def __init__(self, path: str, max_forward: int = 90, synthetic_from: Optional[int] = None):
+        self.path = path
+        self.synthetic_from = synthetic_from
         self.cap = _open(path)
         self.pos = 0  # индекс следующего кадра, который вернёт read()
         self.max_forward = max_forward
+        self.pts_seek = True  # после первой неудачи seek по pts не используется
 
-    def get(self, idx: int) -> Optional[np.ndarray]:
+    def get(self, idx: int, t: Optional[float] = None) -> Optional[np.ndarray]:
+        """Кадр с последовательным индексом idx; t — его время из трекера (нужно для быстрого перехода)."""
         if idx < self.pos or idx - self.pos > self.max_forward:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            self.pos = idx
+            if t is not None and self.pts_seek and (self.synthetic_from is None or idx < self.synthetic_from):
+                if self._seek_pts(t):
+                    ok, frame = self.cap.retrieve()
+                    self.pos = idx + 1
+                    return frame if ok else None
+                self.pts_seek = False
+                self._reopen()  # после seek позиция в файле неизвестна
+            elif idx < self.pos:
+                self._reopen()
         while self.pos < idx:
             if not self.cap.grab():
                 return None
@@ -116,6 +148,24 @@ class FrameReader:
         ok, frame = self.cap.read()
         self.pos += 1
         return frame if ok else None
+
+    def _seek_pts(self, t: float) -> bool:
+        """Seek по времени и grab() вперёд до кадра с pts == t. True — этот кадр захвачен."""
+        self.cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t - self.SEEK_BACK) * 1000.0)
+        for _ in range(self.SEEK_MAX_FRAMES):
+            if not self.cap.grab():
+                return False
+            pts = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if abs(pts - t) <= self.PTS_TOL:
+                return True
+            if pts > t:
+                return False
+        return False
+
+    def _reopen(self) -> None:
+        self.cap.release()
+        self.cap = _open(self.path)
+        self.pos = 0
 
     def close(self) -> None:
         self.cap.release()

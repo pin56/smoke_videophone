@@ -1,10 +1,13 @@
-"""Инфраструктура: суффикс -dirty в manifest, ключ кэша треков, время кадров по pts."""
+"""Инфраструктура: суффикс -dirty в manifest, ключ кэша треков, время кадров по pts, чтение кадров."""
 import subprocess
 
+import cv2
+import numpy as np
 import pytest
 
 from smokedet.export import git_commit
-from smokedet.io_video import FrameClock
+from smokedet import io_video
+from smokedet.io_video import FrameClock, FrameReader
 from smokedet.pipeline import track_cache_key
 
 
@@ -58,3 +61,62 @@ def test_frame_clock_falls_back_without_jump(bad):
 def test_frame_clock_bad_first_frame():
     clock = FrameClock(25.0)
     assert [clock.time(i, -1.0) for i in range(3)] == pytest.approx([0.0, 0.04, 0.08])
+
+
+class VfrCapture:
+    """VideoCapture с переменным fps, seek — как в OpenCV/FFmpeg: номер кадра считается по pts (pts * fps)."""
+
+    FPS = 25.0
+
+    def __init__(self, pts_ms, valid_pts=True):
+        self.pts_ms = pts_ms
+        self.valid_pts = valid_pts
+        self.next = 0  # кадр, который вернёт grab()
+        self.cur = -1  # последний захваченный кадр
+
+    def _seek_number(self, number):
+        # первый кадр, чей «номер по pts» не меньше запрошенного
+        self.next = next((i for i, p in enumerate(self.pts_ms) if round(p / 1000 * self.FPS) >= number), len(self.pts_ms))
+
+    def set(self, prop, value):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            self._seek_number(value)
+        elif prop == cv2.CAP_PROP_POS_MSEC:
+            self._seek_number(value * self.FPS / 1000)
+
+    def get(self, prop):
+        assert prop == cv2.CAP_PROP_POS_MSEC
+        return self.pts_ms[self.cur] if self.valid_pts else 0.0
+
+    def grab(self):
+        if self.next >= len(self.pts_ms):
+            return False
+        self.cur, self.next = self.next, self.next + 1
+        return True
+
+    def retrieve(self):
+        return True, np.full((2, 2, 3), self.cur, np.int32)
+
+    def read(self):
+        return self.retrieve() if self.grab() else (False, None)
+
+    def release(self):
+        pass
+
+
+@pytest.mark.parametrize("real_fps, valid_pts", [(26.0, True), (30.0, True), (26.0, False)])
+def test_frame_reader_exact_frame_on_vfr(monkeypatch, real_fps, valid_pts):
+    # заявлено 25 кадр/с: при 26 pts уходит от idx/fps на 0.6 с за клип (время по pts), при 30 — на 2.7 с,
+    # и часы с 301-го кадра переходят на idx/fps со сдвигом; без pts время синтетическое с первого кадра
+    pts_ms = [i * 1000 / real_fps for i in range(400)]
+    opened = []
+    monkeypatch.setattr(io_video, "_open", lambda path: opened.append(1) or VfrCapture(pts_ms, valid_pts))
+    clock = FrameClock(VfrCapture.FPS)
+    times = [clock.time(i, p if valid_pts else 0.0) for i, p in enumerate(pts_ms)]
+    assert (clock.synthetic_from is None) == (real_fps == 26.0 and valid_pts)
+    with FrameReader("v.mp4", synthetic_from=clock.synthetic_from) as reader:
+        for idx in (350, 120, 360, 10, 399, 200):  # назад и далеко вперёд — через seek
+            assert int(reader.get(idx, times[idx])[0, 0, 0]) == idx
+        assert reader.pts_seek
+    if clock.synthetic_from is None:
+        assert len(opened) == 1  # все переходы — seek по pts, без чтения с начала

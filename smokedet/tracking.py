@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from .config import DetectorConfig, TrackingConfig
-from .io_video import VideoMeta, iter_sampled_frames
+from .io_video import FrameClock, VideoMeta, iter_sampled_frames
 
 log = logging.getLogger(__name__)
 
@@ -162,7 +162,8 @@ class PoseTracker:
         n_processed = 0
         start = time.time()
         total = meta.frame_count // stride if meta.frame_count else None
-        iterator = iter_sampled_frames(meta.path, stride, meta.fps)
+        clock = FrameClock(meta.fps)
+        iterator = iter_sampled_frames(meta.path, stride, meta.fps, clock)
         if progress:
             try:
                 from tqdm import tqdm
@@ -192,6 +193,7 @@ class PoseTracker:
                 tracks.setdefault(int(tid), []).append(PersonObs(frame_idx, t, box, float(score), kp, light))
         if last_idx >= 0 and last_idx + 1 > meta.frame_count:
             meta.frame_count = last_idx + 1  # поток или неверный FRAME_COUNT в контейнере
+        meta.synthetic_from = clock.synthetic_from  # FrameReader не ищет такие кадры по pts
         return TrackSet(meta=meta, stride=stride, tracks=tracks, processed_frames=n_processed, wall_time=time.time() - start)
 
 

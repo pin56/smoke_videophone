@@ -67,6 +67,7 @@ def _box(row: dict):
 def parse_items(rows: List[dict], default_label: str = "POSITIVE") -> List[Item]:
     items = []
     for r in rows:
+        conf = r.get("confidence")
         items.append(
             Item(
                 camera_id=str(r["camera_id"]),
@@ -75,7 +76,7 @@ def parse_items(rows: List[dict], default_label: str = "POSITIVE") -> List[Item]
                 end=float(r["end_sec"]),
                 box=_box(r),
                 label=str(r.get("label") or default_label).upper(),
-                confidence=float(r.get("confidence") or 1.0),
+                confidence=1.0 if conf is None or conf == "" else float(conf),  # число 0 в JSON — не «нет»
                 row=dict(r),
             )
         )

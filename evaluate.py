@@ -41,7 +41,10 @@ def main(argv=None) -> int:
                 w = csv.DictWriter(f, fieldnames=list(matches[0]))
                 w.writeheader()
                 w.writerows(matches)
-        print(f"Отчёт: {out / 'report.json'}, сопоставления: {out / 'matches.csv'}")
+            print(f"Отчёт: {out / 'report.json'}, сопоставления: {out / 'matches.csv'}")
+        else:
+            (out / "matches.csv").unlink(missing_ok=True)  # не оставлять таблицу прошлого запуска
+            print(f"Отчёт: {out / 'report.json'} (сопоставлений нет)")
     return 0
 
 

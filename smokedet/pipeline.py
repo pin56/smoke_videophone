@@ -92,11 +92,17 @@ class Pipeline:
         self._tracker: Optional[PoseTracker] = None
         self.verifier: Optional[ObjectVerifier] = None
         if cfg.verifier.enabled:
+            self._load_verifier(cfg)
+        self.vapor = VaporMeter()
+
+    def _load_verifier(self, cfg: Config) -> ObjectVerifier:
+        """Модель верификатора грузится один раз; в tune.py сетка может включить его при выключенном в базе."""
+        if self.verifier is None:
             vcfg = dataclasses.replace(
                 cfg.verifier, model=project_path(cfg.verifier.model), fallback_model=project_path(cfg.verifier.fallback_model)
             )
             self.verifier = ObjectVerifier(vcfg, self.device)
-        self.vapor = VaporMeter()
+        return self.verifier
 
     @property
     def tracker(self) -> PoseTracker:
@@ -141,8 +147,9 @@ class Pipeline:
             if len(obs) >= 3
         }
         cycles = {tid: detect_cycles(sig, cfg.cycle) for tid, sig in signals.items()}
-        if self.verifier is not None and cfg.verifier.enabled:
-            self.verifier.verify(clip.clip_id, clip.video_path, cycles, signals, cfg.verifier)
+        if cfg.verifier.enabled:
+            self._load_verifier(cfg).verify(clip.clip_id, clip.video_path, cycles, signals, cfg.verifier,
+                                            ts.meta.synthetic_from)  # fmt: skip
         flashes: Dict[int, List[Flash]] = {}
         if cfg.flash.enabled:  # после верификатора: вспышка отмечает только оставшиеся валидными циклы
             for tid, sig in signals.items():
@@ -151,7 +158,7 @@ class Pipeline:
                     flashes[tid] = track_flashes
                     attach_flashes(cycles[tid], track_flashes, cfg.flash)
         if cfg.vapor.enabled:  # после верификатора: пар замеряется только у оставшихся валидными циклов
-            self.vapor.measure(clip.clip_id, clip.video_path, cycles, signals, cfg.vapor)
+            self.vapor.measure(clip.clip_id, clip.video_path, cycles, signals, cfg.vapor, ts.meta.synthetic_from)
         events = build_events(cycles, signals, cfg.episode)
         return Analysis(signals=signals, cycles=cycles, events=events, flashes=flashes)
 

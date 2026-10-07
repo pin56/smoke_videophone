@@ -238,24 +238,33 @@ class ObjectVerifier:
         return out
 
     def _detections(
-        self, clip_id: str, video_path: str, signals: Dict[int, TrackSignal], requests, cfg: VerifierConfig
+        self,
+        clip_id: str,
+        video_path: str,
+        signals: Dict[int, TrackSignal],
+        requests,
+        cfg: VerifierConfig,
+        synthetic_from: Optional[int] = None,
     ) -> Dict[tuple, List[Det]]:
-        """requests — (track_id, sample_idx, margin). Детекции по каждому запросу; недостающие досчитываются."""
+        """requests — (track_id, sample_idx, margin). Детекции по каждому запросу; недостающие досчитываются.
+        synthetic_from — см. VideoMeta: с этого кадра время трекера не pts."""
         pconf = min(PREDICT_CONF, cfg.conf)
         keyed = {}
+        times: Dict[int, float] = {}  # кадр -> его время у трекера (pts): по нему FrameReader ищет кадр
         for tid, k, m in requests:
             sig = signals[tid]
             f = int(sig.frame_idx[k])
+            times[f] = float(sig.t[k])
             box = raw_box(sig.mouth[k], sig.hand[k], sig.scale[k], m)
             keyed[(tid, k, m)] = (f, box, (clip_id, f, box, cfg.imgsz, self.vocab, pconf))
         todo = sorted({v for v in keyed.values() if v[2] not in self.cache}, key=lambda v: (v[0], str(v[1])))
         if todo:
             crops, keys, offsets = [], [], []
-            with FrameReader(video_path) as reader:
+            with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
                 frame_cache: Optional[Tuple[int, np.ndarray]] = None
                 for frame_idx, box, key in todo:
                     if frame_cache is None or frame_cache[0] != frame_idx:
-                        frame_cache = (frame_idx, reader.get(frame_idx))
+                        frame_cache = (frame_idx, reader.get(frame_idx, times[frame_idx]))
                     frame = frame_cache[1]
                     clipped = None if frame is None else clip_box(frame.shape, box)
                     if clipped is None:
@@ -279,6 +288,7 @@ class ObjectVerifier:
         cycles: Dict[int, List[Cycle]],
         signals: Dict[int, TrackSignal],
         cfg: VerifierConfig,
+        synthetic_from: Optional[int] = None,
     ) -> None:
         """Заполняет у валидных циклов поля direct / pos_* / neg_fraction / strong_negative / objects,
         затем отбрасывает циклы людей, у которых по треку найден «двойник» сигареты или предмет для питья."""
@@ -289,13 +299,13 @@ class ObjectVerifier:
             for tid, track_cycles in cycles.items() for c in track_cycles if c.valid
         ]  # fmt: skip
         requests = {(tid, k, m) for tid, _, ks in plan for k in ks for m in margins}
-        dets = self._detections(clip_id, video_path, signals, requests, cfg)
+        dets = self._detections(clip_id, video_path, signals, requests, cfg, synthetic_from)
         for tid, c, ks in plan:
             frames = [merge_detections([best_by_class(dets[(tid, k, m)], cfg.conf) for m in margins]) for k in ks]
             self._aggregate(c, frames, cfg)
         groups = track_groups(cfg, set(self.names.values()))
         if groups and cfg.track_scan_step > 0:
-            self._scan_tracks(clip_id, video_path, cycles, signals, cfg, margins, groups)
+            self._scan_tracks(clip_id, video_path, cycles, signals, cfg, margins, groups, synthetic_from)
 
     def _scan_tracks(
         self,
@@ -306,12 +316,13 @@ class ObjectVerifier:
         cfg: VerifierConfig,
         margins: List[float],
         groups: List[TrackGroup],
+        synthetic_from: Optional[int] = None,
     ) -> None:
         """Ищет «двойников» сигареты и предметы для питья у кисти или рта по всему треку
         (только у людей с валидными циклами)."""
         plan = {tid: scan_indices(signals[tid], cfg.track_scan_step) for tid, cs in cycles.items() if any(c.valid for c in cs)}
         requests = {(tid, k, m) for tid, ks in plan.items() for k in ks for m in margins}
-        dets = self._detections(clip_id, video_path, signals, requests, cfg)
+        dets = self._detections(clip_id, video_path, signals, requests, cfg, synthetic_from)
         for tid, ks in plan.items():
             sig = signals[tid]
             for g in groups:
