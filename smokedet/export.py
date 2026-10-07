@@ -24,6 +24,9 @@ LOG_COLUMNS = [
     "camera_id", "clip_id", "video_path", "start_time", "duration_sec", "fps", "width", "height",
     "processed_frames", "tracking_sec", "analysis_sec", "render_sec", "total_sec", "realtime_factor",
     "events", "device", "from_cache",
+    # части трекинга (в кэше — с исходного прогона) и лёгкой стадии, с; см. TrackSet.timings, Analysis.timings
+    "decode_wait_sec", "pose_sec", "tracker_sec", "refine_sec", "light_sec",
+    "signals_sec", "verifier_sec", "vapor_sec", "appearance_sec",
 ]  # fmt: skip
 
 
