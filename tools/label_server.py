@@ -17,6 +17,7 @@ import io
 import json
 import os
 import secrets
+import ssl
 import sys
 import threading
 from http import cookies
@@ -161,7 +162,7 @@ load();
 </script></html>"""
 
 
-def make_handler(store: Store, token: str):
+def make_handler(store: Store, token: str, secure: bool = False):
     cycle_ids = lambda: {c["id"] for c in store.cycles()}  # noqa: E731
 
     class Handler(BaseHTTPRequestHandler):
@@ -192,7 +193,8 @@ def make_handler(store: Store, token: str):
             q = parse_qs(u.query)
             if not self._authed(q):
                 return self._send(403, "нужен токен: откройте ссылку с ?token=...".encode(), "text/plain; charset=utf-8")
-            extra = [("Set-Cookie", f"token={token}; HttpOnly; SameSite=Strict; Path=/")] if token and "token" in q else []
+            flags = "HttpOnly; SameSite=Strict; Path=/" + ("; Secure" if secure else "")
+            extra = [("Set-Cookie", f"token={token}; {flags}")] if token and "token" in q else []
             path = unquote(u.path)
             if path == "/":
                 return self._send(200, PAGE.encode(), "text/html; charset=utf-8", extra)
@@ -233,6 +235,8 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--token", help="токен доступа (по умолчанию случайный); пустая строка не допускается")
     p.add_argument("--no-auth", action="store_true", help="без токена (только для localhost)")
+    p.add_argument("--cert", help="сертификат TLS (PEM): включает HTTPS; обязателен, если порт виден из интернета")
+    p.add_argument("--key", help="закрытый ключ TLS (PEM)")
     args = p.parse_args(argv)
     data = Path(args.data)
     if not (data / "cycles.jsonl").exists():
@@ -241,9 +245,16 @@ def main(argv=None) -> int:
         sys.exit("--no-auth допустим только на 127.0.0.1")
     # токен лучше передавать через LABEL_TOKEN: аргументы командной строки видны другим пользователям в ps
     token = "" if args.no_auth else (args.token or os.environ.get("LABEL_TOKEN") or secrets.token_urlsafe(12))
-    srv = ThreadingHTTPServer((args.host, args.port), make_handler(Store(data), token))
+    if bool(args.cert) != bool(args.key):
+        sys.exit("--cert и --key нужны вместе")
+    srv = ThreadingHTTPServer((args.host, args.port), make_handler(Store(data), token, secure=bool(args.cert)))
+    if args.cert:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(args.cert, args.key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     shown = "localhost" if args.host in ("0.0.0.0", "127.0.0.1") else args.host
-    print(f"Разметчик: http://{shown}:{args.port}/" + (f"?token={token}" if token else ""))
+    print(f"Разметчик: {'https' if args.cert else 'http'}://{shown}:{args.port}/" + (f"?token={token}" if token else ""))
     print("Данные:", data.resolve(), "| Ctrl+C — остановить")
     try:
         srv.serve_forever()
