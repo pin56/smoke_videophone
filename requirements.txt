@@ -14,3 +14,4 @@ lap>=0.5.12,<0.6  # ассоциация в ByteTrack; ultralytics ставит 
 # текстовый энкодер для open-vocab верификатора (YOLO-World); без него — откат на COCO-детектор
 clip @ git+https://github.com/ultralytics/CLIP.git@a13192f8cb767260d7dfd98c843b0716593169e7
 pytest>=8,<10
+scikit-learn>=1.5  # tools/train_cycle_clf.py (только обучение)
