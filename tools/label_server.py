@@ -15,6 +15,7 @@ import csv
 import hmac
 import io
 import json
+import os
 import secrets
 import sys
 import threading
@@ -238,7 +239,8 @@ def main(argv=None) -> int:
         sys.exit(f"нет {data / 'cycles.jsonl'}: сначала tools/export_cycles.py")
     if args.no_auth and args.host != "127.0.0.1":
         sys.exit("--no-auth допустим только на 127.0.0.1")
-    token = "" if args.no_auth else (args.token or secrets.token_urlsafe(12))
+    # токен лучше передавать через LABEL_TOKEN: аргументы командной строки видны другим пользователям в ps
+    token = "" if args.no_auth else (args.token or os.environ.get("LABEL_TOKEN") or secrets.token_urlsafe(12))
     srv = ThreadingHTTPServer((args.host, args.port), make_handler(Store(data), token))
     shown = "localhost" if args.host in ("0.0.0.0", "127.0.0.1") else args.host
     print(f"Разметчик: http://{shown}:{args.port}/" + (f"?token={token}" if token else ""))
