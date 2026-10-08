@@ -189,7 +189,8 @@ class ClipEncoder:
                 self.npos.append(len(pos))
         self.scale = float(self.model.logit_scale.detach().exp())
 
-    def __call__(self, crops: List[np.ndarray], view: int) -> np.ndarray:
+    def embed(self, crops: List[np.ndarray]):
+        """Кропы BGR -> нормированные векторы изображений (torch, float32)."""
         torch = self.torch
         x = torch.stack([self.preprocess(self.Image.fromarray(np.ascontiguousarray(c[:, :, ::-1]))) for c in crops])
         with torch.no_grad():
@@ -197,7 +198,12 @@ class ClipEncoder:
                 e = torch.from_numpy(self.visual(x.numpy())[0]).float()
             else:
                 e = self.model.encode_image(x.to(self.device)).float()
-            e = e / e.norm(dim=-1, keepdim=True)
+        return e / e.norm(dim=-1, keepdim=True)
+
+    def __call__(self, crops: List[np.ndarray], view: int) -> np.ndarray:
+        torch = self.torch
+        e = self.embed(crops)
+        with torch.no_grad():
             lg = self.scale * e @ self.text[view].T
             n = self.npos[view]
             s = torch.logsumexp(lg[:, :n], dim=1) - torch.logsumexp(lg[:, n:], dim=1)

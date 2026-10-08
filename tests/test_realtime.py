@@ -11,11 +11,13 @@ from smokedet.episodes import build_events
 from smokedet.realtime import (
     FrameRing,
     PersonJob,
+    RealtimeSession,
     SparseTracker,
     StreamFrame,
     Ticker,
     alert_change,
     dropped_alert,
+    inference_hash,
     interp_box,
     keep_cycle,
     letterbox,
@@ -324,3 +326,30 @@ def test_dropped_duplicate_alert():
     assert not dropped_alert(st, [cyc(6, 8)])  # событие держится на цикле другого задания
     assert not dropped_alert((3.0, 7.0, False), [])  # тревога уже снята
     assert not dropped_alert(None, [])
+
+
+def test_skip_confirmed_only_after_confident_event():
+    cfg = with_overrides(Config(), ["realtime.objects=true", "realtime.skip_confirmed=true", "realtime.many_cycles=5",
+                                    "realtime.many_min_score=10", "appearance.min_score=0.5"])  # fmt: skip
+    ses = RealtimeSession(None, cfg, SimpleNamespace(), Roi.full())
+    job, _ = stream_job([1.0, 7.0, 13.0], total=40.0)
+    ses.jobs = [job]
+    c0, c1, c2 = job.cycles
+    c0.appearance = 11.0
+    nxt = SimpleNamespace(valid=True, start=c2.start)
+    assert not ses._confirmed(1, nxt)  # тревоги нет
+    ses._alerted[1] = (c0.start, c0.end, True)
+    assert ses._confirmed(1, nxt)  # продолжение события с уверенной оценкой: CLIP не нужен
+    assert not ses._confirmed(1, SimpleNamespace(valid=False, start=c1.start))  # невалидный — вдруг вернёт rescue
+    assert not ses._confirmed(1, SimpleNamespace(valid=True, start=c0.end + 16.0))  # новое событие (merge_gap 15)
+    c0.appearance = 9.0  # лучшая оценка ниже many_min_score: новые оценки ещё могут снять событие
+    assert not ses._confirmed(1, nxt)
+    ses.rc = with_overrides(cfg, ["realtime.skip_confirmed=false"]).realtime
+    c0.appearance = 11.0
+    assert not ses._confirmed(1, nxt)
+
+
+def test_alert_hold_in_cache_key_only_when_set():
+    cfg = Config()
+    assert inference_hash(cfg) == inference_hash(with_overrides(cfg, ["realtime.skip_confirmed=true"]))
+    assert inference_hash(cfg) != inference_hash(with_overrides(cfg, ["realtime.alert_hold=20"]))

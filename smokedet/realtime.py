@@ -49,7 +49,10 @@ log = logging.getLogger(__name__)
 CACHE_VERSION = 1
 # поля секции realtime, от которых не зависят отсчёты стадий 1–3 (не входят в ключ кэша, меняются повтором)
 RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", "rule_overrides", "finalize_window",
-               "start_hold", "threads")  # fmt: skip
+               "start_hold", "threads", "skip_confirmed")  # fmt: skip
+# поля, добавленные после первых прогонов: в ключ кэша входят, только если отличаются от этих значений (старые кэши
+# остаются действительны)
+HASH_DEFAULTS = {"alert_hold": 0.0}
 DUP_IOU = 0.8  # два задания плотной проверки с такими рамками — один человек (рамки позы сошлись на нём)
 EPS = 1e-6
 PREFETCH = 8  # кадров плотной сетки, декодированных заранее (поток чтения работает, пока занят GPU)
@@ -626,6 +629,7 @@ def inference_hash(cfg: Config) -> str:
     """Параметры, от которых зависят отсчёты стадий 1–3: секция realtime (кроме правил и стадии 4), geometry и
     tracking (триггер считается по той же геометрии), видео."""
     rc = {f.name: getattr(cfg.realtime, f.name) for f in fields(cfg.realtime) if f.name not in RULE_FIELDS}
+    rc = {k: v for k, v in rc.items() if not (k in HASH_DEFAULTS and v == HASH_DEFAULTS[k])}
     data = {"realtime": rc, "geometry": cfg.to_dict()["geometry"], "tracking": cfg.to_dict()["tracking"],
             "video": cfg.to_dict()["video"]}  # fmt: skip
     return hashlib.sha256(repr(sorted(data.items())).encode()).hexdigest()[:16]
@@ -786,9 +790,16 @@ class RealtimeSession:
             if np.isfinite(d) and d < rc.trigger_dist:
                 self.stats["triggers"] += 1
                 if dense:
-                    self.active[tid].until = f.t + rc.dense_after
+                    self.active[tid].until = max(self.active[tid].until, f.t + rc.dense_after)
                 else:
                     triggered.append((d, tid, r))
+            elif rc.alert_hold > 0 and self._alerted.get(tid, (0, 0, False))[2]:
+                # человек с действующей тревогой: плотная проверка, пока виден (после сработавших — по слотам)
+                if dense:
+                    self.active[tid].until = max(self.active[tid].until, f.t + rc.alert_hold)
+                else:
+                    triggered.append((rc.trigger_dist + (d if np.isfinite(d) else 0.0), tid, r))
+                    self.stats["alert_holds"] += 1
             elif not dense:
                 idle.append((d if np.isfinite(d) else math.inf, tid, r))
         self._drop_duplicates(f.t)
@@ -879,9 +890,26 @@ class RealtimeSession:
                 job.crops.clear()
                 del self.active[tid]
 
+    def _confirmed(self, tid: int, c: Cycle) -> bool:
+        """Валидный цикл продолжает событие человека с действующей тревогой, а лучшая оценка CLIP этого события уже
+        не ниже appearance.min_score и many_min_score: его оценка решения по событию не изменит (realtime.skip_confirmed)."""
+        st = self._alerted.get(tid)
+        if not (self.rc.skip_confirmed and c.valid and st is not None and st[2]):
+            return False
+        if c.start - st[1] > self.cfg.episode.merge_gap + EPS:
+            return False  # новое событие
+        scores = [x.appearance for j in self.jobs if j.tid == tid for x in j.cycles
+                  if x.valid and np.isfinite(x.appearance) and st[0] - EPS <= x.start <= st[1] + EPS]  # fmt: skip
+        need = max(self.cfg.appearance.min_score, self.rc.many_min_score if self.rc.many_cycles > 0 else -math.inf)
+        return bool(scores) and max(scores) >= need
+
     def _score(self, job: PersonJob, new: List[Cycle], sig: TrackSignal) -> None:
         ac = self.cfg.appearance
         todo = [c for c in new if c.valid or rescuable(c, ac)]
+        skip = [c for c in todo if self._confirmed(job.tid, c)]
+        if skip:
+            todo = [c for c in todo if c not in skip]
+            self.stats["skipped_cycles"] += len(skip)
         if not todo:
             return
         t0 = time.perf_counter()
