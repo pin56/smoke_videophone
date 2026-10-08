@@ -34,6 +34,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5   # перебор порогов режима повтором из кэша
 .venv/bin/python ui.py --inputs data/demo.csv --out runs/final          # веб-интерфейс повтора анализа на 127.0.0.1:8765
 .venv/bin/python monitor.py --analyzer demo --out runs/monitor         # мониторинг: стена камер, архив, проверка видео, журнал
+.venv/bin/python monitor.py --analyzer realtime --enqueue videos/true videos/false   # проверка имеющихся записей потоковым режимом
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report
 .venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv auto|clip|camera|none]
 .venv/bin/python tools/eval_markup.py --run runs/x [--run runs/y]   # оценка прогонов по rasmetka_gt.csv (только время, без IoU)

@@ -7,7 +7,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from smokedet.monitor.analysis import AnalysisQueue, DemoAnalyzer, PipelineAnalyzer
+import pytest
+
+from smokedet.monitor.analysis import AnalysisQueue, DemoAnalyzer, PipelineAnalyzer, video_sources
 from smokedet.monitor.cameras import PRE_ROLL, CameraWall, health_script
 from smokedet.monitor.journal import DAY, Journal
 from smokedet.monitor.server import MonitorServer, parse_range
@@ -168,6 +170,50 @@ def test_pipeline_without_models_fails_job_with_reason(tmp_path):
     q.submit("job1")
     _wait(lambda: j.job("job1")["state"] == "error")
     assert "torch" in j.job("job1")["error"]
+
+
+def test_video_sources_from_files_folders_and_csv(tmp_path):
+    for d in ("true", "false"):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "1.mp4").write_bytes(b"x")
+    (tmp_path / "true" / "notes.txt").write_text("-")
+    rows = ["video_path,camera_id,clip_id", "true/1.mp4,cam1,true_1", "false/1.mp4,cam2,"]
+    (tmp_path / "list.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    got = video_sources([str(tmp_path / "true"), str(tmp_path / "list.csv"), str(tmp_path / "false" / "1.mp4")])
+    assert [name for _, name in got] == ["true/1.mp4", "true_1.mp4", "1.mp4", "1.mp4"]
+    assert got[1][0] == (tmp_path / "true" / "1.mp4").resolve()
+    with pytest.raises(ValueError):
+        video_sources([str(tmp_path / "missing.mp4")])
+    with pytest.raises(ValueError):
+        video_sources([str(tmp_path / "true" / "notes.txt")])
+
+
+class _NoEpisodes:
+    name = "realtime"
+
+    def available(self) -> str:
+        return ""
+
+    def run(self, path, job_id, on_progress):
+        assert Path(path).read_bytes() == b"video"
+        return [], 12.0
+
+
+def test_enqueued_record_survives_purge(tmp_path):
+    clock = Clock()
+    j = _journal(tmp_path, clock=clock, retention=DAY)
+    q = AnalysisQueue(j, _NoEpisodes(), tmp_path / "up", tmp_path / "clips")
+    src = tmp_path / "rec" / "cam.mp4"
+    src.parent.mkdir()
+    src.write_bytes(b"video")
+    job_id = q.enqueue_file(src, "rec/cam.mp4")
+    job = j.job(job_id)
+    assert (job["filename"], job["analyzer"], job["state"]) == ("rec/cam.mp4", "realtime", "queued")
+    q.process(job_id)
+    assert j.job(job_id)["state"] == "done" and j.job(job_id)["duration"] == 12.0
+    clock.t += 2 * DAY
+    assert j.purge()["uploads"] == 1
+    assert not Path(job["path"]).exists() and src.read_bytes() == b"video"
 
 
 def _wait(cond, timeout=10.0):

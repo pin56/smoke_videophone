@@ -836,6 +836,12 @@ async function loadJobs() {
   else if (Jobs.active()) Jobs.timer = setTimeout(loadJobs, 3000);
 }
 
+// журнал общий для запусков с разными анализаторами: видно, каким режимом проверена запись
+function analyzerTag(a) {
+  if (a === "demo") return ' · <span class="tag">демо-анализ</span>';
+  return a === "realtime" ? ' · <span class="tag">потоковый режим</span>' : "";
+}
+
 function jobStatus(j) {
   if (j.state === "analyzing") return `${JOB_TEXT.analyzing} · ${Math.round(j.progress * 100)}%`;
   if (j.state === "done") return `${JOB_TEXT.done} · ${j.episodes} ${plural(j.episodes, "эпизод", "эпизода", "эпизодов")}`;
@@ -850,7 +856,7 @@ function renderJobs() {
       <div class="bar"><i style="width:${u.progress * 100}%"></i></div></li>`).join("");
   const jobs = Jobs.list.map((j) => `<li class="job ${Jobs.selected === j.id ? "on" : ""}" data-job-id="${esc(j.id)}" tabindex="0">
       <div class="job-top"><b>${esc(j.filename)}</b><span class="state s-${j.state}">${jobStatus(j)}</span></div>
-      <div class="job-sub">${mb(j.size)}${j.duration ? ` · ${mmss(j.duration)}` : ""} · загружен ${dayTime(j.created_at)}${j.analyzer === "demo" ? ' · <span class="tag">демо-анализ</span>' : ""}</div>
+      <div class="job-sub">${mb(j.size)}${j.duration ? ` · ${mmss(j.duration)}` : ""} · загружен ${dayTime(j.created_at)}${analyzerTag(j.analyzer)}</div>
       ${j.state === "analyzing" ? `<div class="bar"><i style="width:${j.progress * 100}%"></i></div>` : ""}
       ${j.state === "error" ? `<div class="job-error">${esc(j.error)}</div>` : ""}
       ${j.deleted_at ? `<div class="job-sub">файл удалён ${day(j.deleted_at)} по сроку хранения</div>` : j.expires_at ? `<div class="job-sub">файл и фрагменты хранятся до ${dayTime(j.expires_at)}</div>` : ""}
@@ -912,7 +918,7 @@ function renderJobDetail(job, keepVideo) {
   }
   const html = `
     <div class="detail-head">
-      <div><h2 class="h2">${esc(job.filename)}</h2><p class="muted">${mb(job.size)}${dur ? ` · ${mmss(dur)}` : ""} · загружен ${dayTime(job.created_at)}</p></div>
+      <div><h2 class="h2">${esc(job.filename)}</h2><p class="muted">${mb(job.size)}${dur ? ` · ${mmss(dur)}` : ""} · загружен ${dayTime(job.created_at)}${analyzerTag(job.analyzer)}</p></div>
       <span class="state s-${job.state}">${jobStatus(job)}</span>
     </div>
     ${job.analyzer === "demo" ? '<p class="banner">Демо-анализ: эпизоды сгенерированы для показа интерфейса и не являются результатом модели.</p>' : ""}

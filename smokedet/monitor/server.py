@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import secrets
 import sys
 import time
 from http import HTTPStatus
@@ -24,7 +23,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from .analysis import MAX_UPLOAD, VIDEO_EXT, AnalysisQueue
+from .analysis import MAX_UPLOAD, VIDEO_EXT, AnalysisQueue, new_job_id
 from .cameras import FPS, POST_ROLL, PRE_ROLL, CameraWall
 from .journal import DAY, REVIEWS, Journal
 
@@ -279,7 +278,7 @@ class Handler(BaseHTTPRequestHandler):
             duration = duration if duration > 0 and duration < 1e7 else None
         except ValueError:
             duration = None
-        job_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+        job_id = new_job_id()
         target = s.analysis.uploads_dir / f"{job_id}{ext}"
         left = size
         with open(target, "wb") as f:

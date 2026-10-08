@@ -2,32 +2,40 @@
 
 Анализатор выбирается при запуске:
 - `pipeline` — настоящий пайплайн (`Pipeline.track` + `analyze`), эпизоды — события с `passed`;
+- `realtime` — потоковый режим (`run_rt.py`, `smokedet/realtime.py`): кадр 1 Гц, поза на кропах, плотная проверка
+  у людей с рукой у рта, правило `realtime.rule_overrides`; эпизоды — события с `passed`;
 - `demo` — для показа интерфейса без моделей: эпизоды генерируются по имени и длительности файла и помечены
   в журнале как демо (`demo=1`). Сам по себе демо-режим не включается.
 
 Фрагмент эпизода — запись с запасом `PRE_ROLL`/`POST_ROLL`. Если есть ffmpeg, он вырезается в отдельный mp4
 (H.264, играет любой браузер); иначе фрагмент — окно в исходном файле (`clip_kind='range'`), который тогда
 хранится столько же, сколько фрагменты.
+
+Имеющиеся записи (`monitor.py --enqueue`) ставятся в очередь без загрузки через браузер: в папку загрузок кладётся
+жёсткая ссылка на файл (или копия, если ссылку сделать нельзя), поэтому очистка по сроку не трогает исходник.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 import logging
+import os
 import queue
 import random
+import secrets
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from .cameras import POST_ROLL, PRE_ROLL
 from .journal import Journal
 
 log = logging.getLogger(__name__)
 
-VIDEO_EXT = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm", ".ts", ".mpg", ".mpeg"}
+VIDEO_EXT = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm", ".ts", ".mpg", ".mpeg", ".wmv"}
 MAX_UPLOAD = 8 << 30  # 8 ГБ
 
 
@@ -70,12 +78,55 @@ class PipelineAnalyzer:
 
         ts = self._pipeline.track(clip, self.out_dir / "cache", on_progress=progress)
         analysis = self._pipeline.analyze(clip, ts)
-        duration = ts.meta.duration or None
-        episodes = [
-            Episode(e.start, e.end, e.to_dict()["n_movements"], float(e.confidence), e.track_id)
-            for e in analysis.events if e.passed
-        ]  # fmt: skip
-        return episodes, duration
+        return _episodes(analysis.events), ts.meta.duration or None
+
+
+class RealtimeAnalyzer(PipelineAnalyzer):
+    """Потоковый режим, как `run_rt.py`, но без кэша отсчётов: у каждого задания свой файл. Модели грузятся
+    при первом задании; конфиг — `load_rt_config` (YAML → realtime.rule_overrides → --set)."""
+
+    name = "realtime"
+
+    def __init__(self, config: str, overrides: List[str], out_dir: Path):
+        super().__init__(config, overrides, out_dir)
+        self._cfg = None
+        self._detector = None
+
+    def run(self, path: Path, job_id: str, on_progress: Callable[[float], None]) -> tuple:
+        reason = self.available()
+        if reason:
+            raise AnalyzerUnavailable(reason)
+        from ..io_video import probe_video
+        from ..realtime import RealtimeDetector, analyze, load_rt_config
+        from ..roi import Roi
+
+        if self._detector is None:
+            self._cfg = load_rt_config(self.config, self.overrides)
+            self._detector = RealtimeDetector(self._cfg)
+        cfg, det = self._cfg, self._detector
+        total = probe_video(str(path), cfg.video.fallback_fps).duration
+        shown = [0.0]
+
+        def on_frame(f) -> None:  # кадры идут по ~5 в секунду видео: журнал обновляем не чаще 2 раз в секунду
+            now = time.monotonic()
+            if total and now - shown[0] >= 0.5:
+                shown[0] = now
+                on_progress(0.95 * min(f.t / total, 1.0))
+
+        run, jobs = det.run(str(path), cfg, on_frame=on_frame)
+        roi = Roi.load(None, run.meta.width, run.meta.height)
+        _, _, events = analyze(run, cfg, roi, jobs, det.appearance, job_id, str(path))
+        dur = run.meta.duration
+        log.info("[%s] потоковый режим: %.1f с видео за %.1f с (загрузка %.2f), сообщений о курении %d", job_id, dur,
+                 run.wall_time, run.wall_time / dur if dur else 0.0, len(run.alerts))  # fmt: skip
+        return _episodes(events), dur or None
+
+
+def _episodes(events) -> List[Episode]:
+    return [
+        Episode(e.start, e.end, e.to_dict()["n_movements"], float(e.confidence), e.track_id)
+        for e in events if e.passed
+    ]  # fmt: skip
 
 
 class DemoAnalyzer:
@@ -113,6 +164,35 @@ class DemoAnalyzer:
         return episodes, duration
 
 
+def new_job_id() -> str:
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+
+
+def video_sources(paths: Iterable[str]) -> List[Tuple[Path, str]]:
+    """Имеющиеся записи для `--enqueue`: (файл, имя в журнале). Принимает видеофайлы, папки (видео в самой папке,
+    имя — «папка/файл», чтобы 1.mp4 из true и false различались) и CSV со списком клипов, как у run.py
+    (`video_path[,camera_id,clip_id,...]`, пути — от CSV, имя — clip_id). Нет файла — ValueError."""
+    out: List[Tuple[Path, str]] = []
+    for arg in paths:
+        p = Path(arg)
+        if p.is_dir():
+            out += [(f, f"{p.name}/{f.name}") for f in sorted(p.iterdir()) if f.suffix.lower() in VIDEO_EXT]
+        elif p.suffix.lower() == ".csv":
+            with open(p, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    video = p.resolve().parent / row["video_path"].strip()
+                    clip_id = (row.get("clip_id") or "").strip()
+                    out.append((video, f"{clip_id}{video.suffix}" if clip_id else video.name))
+        else:
+            out.append((p, p.name))
+    for f, _ in out:
+        if not f.is_file():
+            raise ValueError(f"нет файла {f}")
+        if f.suffix.lower() not in VIDEO_EXT:
+            raise ValueError(f"не видео: {f} (нужно {', '.join(sorted(VIDEO_EXT))})")
+    return out
+
+
 def _importable(module: str) -> bool:
     import importlib.util
 
@@ -139,6 +219,19 @@ class AnalysisQueue:
 
     def submit(self, job_id: str) -> None:
         self._queue.put(job_id)
+
+    def enqueue_file(self, src: Path, name: str) -> str:
+        """Ставит имеющуюся запись в очередь. Файл задания — жёсткая ссылка на исходник (или копия): по истечении
+        срока `Journal.purge` удаляет файл задания, а исходная запись должна остаться."""
+        job_id = new_job_id()
+        target = self.uploads_dir / f"{job_id}{src.suffix.lower()}"
+        try:
+            os.link(src, target)
+        except OSError:
+            shutil.copy2(src, target)
+        self.journal.add_job(job_id, name, str(target), src.stat().st_size, None, self.analyzer.name)
+        self.submit(job_id)
+        return job_id
 
     def _loop(self) -> None:
         while True:
