@@ -30,6 +30,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python run.py --input videos/1.mp4 --camera-id cam1 --out runs/x --render   # один клип
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final     # набор клипов (CSV: video_path,camera_id[,clip_id,start_time,roi])
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final --workers 2   # клипы параллельно, по процессу на клип
+.venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final [--no-objects]   # потоковый режим (1 Гц + плотная проверка), load в realtime_log.csv
+.venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5   # перебор порогов режима повтором из кэша
 .venv/bin/python ui.py --inputs data/demo.csv --out runs/final          # веб-интерфейс повтора анализа на 127.0.0.1:8765
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report
 .venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv auto|clip|camera|none]
@@ -63,6 +65,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 с кадром без пересчёта. Сервер — stdlib `ThreadingHTTPServer` только на 127.0.0.1, видео отдаётся с HTTP Range (без него браузер
 не перематывает), не-H.264 перекодируется ffmpeg в `<out>/ui/`. Причины отказа и названия классов верификатора переводятся в
 `payload.CYCLE_REASONS`/`OBJECT_NAMES` — новую причину или класс добавляйте туда.
+
+Потоковый режим (`run_rt.py`, `smokedet/realtime.py`, перебор — `tools/tune_rt.py`) — отдельный путь, `Pipeline.track`/`analyze`
+не использует, общие с конвейером только `geometry.build_signal`, `cycles.detect_cycles`, `episodes.build_events` и
+`appearance`. `iter_stream` берёт кадры на сетке pts (`Ticker`: `sparse_fps` 1 Гц и `dense_fps`). `RealtimeSession._sparse_step`:
+yolo11n `PersonDetector` → `SparseTracker` (жадно по IoU/центрам) → `CropPose` (кропы letterbox в квадрат `pose_imgsz`, батчем)
+→ `d` кисть→рот → при `d < trigger_dist` задание `PersonJob` с бэкфиллом из кольцевого буфера `FrameRing` по рамкам
+`interp_box` → `_drop_duplicates`. `_dense_step` — поза на кропах активных заданий; рамка кропа — `PersonJob.predict_box`
+(последняя найденная, сдвинутая по скорости центра за `motion_window`; без этого идущий человек уходит из кропа,
+пока детектор его не видит, — так терялся sm_7). `PersonJob.finalize` на каждом шаге 1 Гц гоняет `build_signal` +
+`detect_cycles` по хвосту `finalize_window`, цикл фиксируется через `lookaround` + 1 с после конца; `start_hold` снимает
+`no_approach` у паузы в начале потока. Стадия 4 (`realtime.objects`, по умолчанию вкл.) — CLIP по кропам, сохранённым
+в памяти (`store_crop`/`score_from_memory`); при `objects_per_event` порог `appearance.min_score` проверяет `rt_events` по
+лучшему циклу события (`keep_cycle` оставляет слабые циклы валидными), а не по каждому циклу, как в основном конвейере.
+Правило режима — `realtime.rule_overrides` (`load_rt_config`: YAML → rule_overrides → `--set`), подобрано `tune_rt.py` так,
+чтобы все 19 true-клипов разметки дали событие. Кэш `<out>/cache/<clip>_rt.pkl`: ключ — видео + секция `realtime` кроме
+`RULE_FIELDS` + geometry/tracking/video; параметр, не влияющий на отсчёты стадий 1–3, добавляйте в `RULE_FIELDS`, иначе
+он без нужды сбросит кэш. `analyze()` без заданий в памяти повторяет шаги из кэша (`replay_job`), поэтому `tune_rt.py`
+даёт то же, что поток; CLIP при повторе перечитывает кадры пауз из видео (первая точка сетки долгая). Нагрузка `load` в
+`realtime_log.csv` — время / длительность (≤ 1 — успевает), `realtime_factor` в `processing_log.csv` — обратная величина,
+как у `run.py`. `CropPose` прогревает все размеры батча 1..`POSE_BATCH`: новая форма входа на CUDA стоит ~0.8 с.
+Два GPU-прогона одновременно искажают `load`.
 
 Неочевидные моменты:
 - `configs/default.yaml` обязан совпадать с dataclass-значениями по умолчанию в `smokedet/config.py`; это проверяет `test_config_roundtrip`. При добавлении параметра правьте оба файла. Неизвестные ключи в YAML или `--set` вызывают ошибку. Значения приводятся к типу значения по умолчанию (`config._coerce`): `--set detector.device=0` — строка `"0"`, а не число, одиночная строка для списка классов — список из одного элемента.
