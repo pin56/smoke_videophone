@@ -126,6 +126,30 @@ python tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
     --grid episode.confidence_threshold=0.3,0.4,0.5,0.6 --grid cycle.near_enter=0.5,0.6,0.7
 ```
 
+### Эталон через CVAT
+
+Разметка `rasmetka_gt.csv` — только время отметок, без человека и рамки. Чтобы получить полный эталон,
+её правят в CVAT. Детекция не перезапускается: рамки людей берутся из кэша треков любого прогона.
+
+```bash
+python tools/cvat_export.py --inputs data/ref.csv --cache runs/ref/cache --out runs/cvat   # XML на видео + labels.json
+python tools/cvat_import.py runs/cvat_done --inputs data/ref.csv --cache runs/ref/cache --out data/ref_gt.csv
+```
+
+1. В CVAT (только локальный, docker: видео объекта нельзя отправлять в облако) создать проект и в Constructor → Raw
+   вставить `labels.json`. Метки: `smoking` / `not_smoking` / `ignore` (эпизоды, в эталоне — POSITIVE / NEGATIVE / IGNORE)
+   и `person` (треки трекера, для справки, в эталон не идут).
+2. На каждое видео — задача с именем `clip_id` (frame step 1, без start/stop frame), затем Actions → Upload annotations →
+   «CVAT 1.1» → `<clip_id>.xml`.
+3. Эпизод — трек от подъёма руки первой отметки до опускания последней. Отметки одного человека объединены
+   при паузе ≤ 15 с, человек выбран по наименьшему расстоянию кисть→рот. Сомнительные привязки отмечены
+   атрибутом `check` (причина — в `note`): фильтр `attr["check"] == true`, после проверки флажок снять.
+   Рамка эталона — рамка трека в `peak_sec` (атрибут, по умолчанию — затяжка средней отметки).
+4. Выгрузить задачи в «CVAT for video 1.1» (без изображений) в одну папку и запустить `cvat_import.py`.
+   Клип узнаётся по имени видео, задачи или файла выгрузки. Каждый видимый отрезок трека эпизода — одно событие.
+   Секунды считаются по pts из того же кэша (у CCTV-файлов с переменным fps `кадр/fps` уходит до 0.7 с).
+   Если число кадров в CVAT и у трекера не совпадает, скрипт предупредит.
+
 ## Фиксация результата (9 октября)
 
 1. Подобрать пороги на эталоне (`tune.py`), записать лучшие в `configs/default.yaml`.

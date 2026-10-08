@@ -30,6 +30,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final --workers 2   # клипы параллельно, по процессу на клип
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report
 .venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv clip|camera|none]
+.venv/bin/python tools/cvat_export.py --inputs ref.csv --cache runs/x/cache --out runs/cvat   # rasmetka_gt.csv + кэш треков -> XML CVAT
+.venv/bin/python tools/cvat_import.py runs/cvat_done --inputs ref.csv --cache runs/x/cache --out gt.csv   # выгрузки CVAT -> эталон
 ```
 
 Любой параметр переопределяется через `--set section.key=value`. Линтера и сборки в проекте нет.
@@ -54,6 +56,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Кэш верификатора — в памяти, по ключу `(clip_id, frame_idx, рамка кропа, imgsz, FP16, словарь, порог предсказания)`; модель запускается с `PREDICT_CONF`, а `cfg.conf` применяется при агрегации, поэтому сетки tune.py по conf, геометрии, imgsz и спискам классов дают свежие результаты (при смене классов словарь задаётся заново). Кэш пара (`VaporMeter`) включает отпечаток сигналов клипа. Если open-vocab модель не загрузилась (нет CLIP или весов), верификатор переключается на COCO-модель и работает только с негативными классами.
 - Словарь YOLO-World «запекается» в `weights/<модель>-vocab-<хэш списка классов>.pt` (без кэшированного CLIP, ~26 МБ): если файл есть, CLIP не нужен. После правки списков классов запустите `tools/prepare_weights.py` с интернетом, иначе офлайн верификатор откатится на COCO. В `manifest.json` — фактический файл весов и `clip_used`.
 - `manifest.json` пишет git-коммит с суффиксом `-dirty`, если есть незакоммиченные изменения в отслеживаемых файлах (неотслеживаемые видео и `runs/` не в счёт). Перед финальным прогоном код должен быть закоммичен.
+- Обмен с CVAT (`smokedet/cvat.py`): номер кадра CVAT — последовательный индекс, как у трекера, а секунды переводятся по pts наблюдений из кэша треков (`FrameTime`), поэтому импорт требует тот же кэш, что и экспорт. Неизменяемые атрибуты трека пишутся в каждый `<box>`: CVAT берёт их из рамок. Трек без завершающей рамки `outside` в CVAT виден до конца видео.
 - Формат эталона в `smokedet/evaluation.py::parse_items` — предположение. Если организатор выдаст валидатор и формат, адаптировать нужно эту функцию.
 
 Веса скачиваются ultralytics автоматически в `weights/` (git их не отслеживает); `tools/prepare_weights.py` скачивает все веса конфига (вкл. COCO-откат `yolo11s.pt`) и запекает словарь — запускать до выезда. Выбор pose-модели пока открыт: по умолчанию стоит `yolo11m-pose`, кандидат — `yolo26m-pose`. Он полностью совместим, скорость на MPS та же, официальный COCO mAP выше. Окончательно выбирать на эталонном наборе.
