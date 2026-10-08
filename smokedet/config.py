@@ -225,6 +225,8 @@ class RealtimeConfig:
     start_hold: bool = True  # пауза в первые cycle.lookaround с потока не отбрасывается за no_approach (рука уже у рта)
     objects: bool = True  # стадия 4: CLIP по кропам «рот + кисть» в паузе (параметры — секция appearance)
     objects_per_event: bool = True  # стадия 4: appearance.min_score — по лучшему циклу события, а не по каждому циклу
+    many_cycles: int = 5  # стадия 4 по событиям: у события с таким числом оценённых CLIP циклов (0 — нет)...
+    many_min_score: float = 10.0  # ...лучшая оценка не ниже: много подходов руки без сигареты — питьё, касание лица
     # переопределения общих секций для этого режима, как --set; --set их перекрывает. Подобраны tools/tune_rt.py
     # на 34 клипах (все 19 true с событием), пояснения — в configs/default.yaml
     rule_overrides: List[str] = field(
