@@ -6,7 +6,7 @@ video:
   fallback_fps: 25.0        # если в контейнере нет корректного FPS
 
 detector:
-  pose_model: weights/yolo11m-pose.pt   # скачивается автоматически; точнее — yolo11x-pose.pt
+  pose_model: weights/yolo11m-pose.pt   # скачивается автоматически; yolo11x-pose и yolo26m-pose на разметке хуже (CLAUDE.md)
   imgsz: 1280               # CCTV: люди мелкие, поэтому вход больше стандартных 640
   conf: 0.1                 # низкий порог: ByteTrack использует слабые детекции во втором проходе
   iou: 0.6
