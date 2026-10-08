@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
 # поля секции realtime, от которых не зависят отсчёты стадий 1–3 (не входят в ключ кэша, меняются повтором)
-RULE_FIELDS = ("objects", "rule_overrides", "finalize_window", "start_hold")
+RULE_FIELDS = ("objects", "objects_per_event", "rule_overrides", "finalize_window", "start_hold")
 DUP_IOU = 0.8  # два задания плотной проверки с такими рамками — один человек (рамки позы сошлись на нём)
 EPS = 1e-6
 PREFETCH = 8  # кадров плотной сетки, декодированных заранее (поток чтения работает, пока занят GPU)
@@ -55,6 +55,9 @@ SETTLE_EXTRA = 1.0  # с сверх cycle.lookaround: после конца ци
 CROP_SIDE = 1.2  # стадия 4: в памяти хранится квадрат со стороной CROP_SIDE роста вокруг «рот + кисть»...
 CROP_MAX = 576  # ...не больше CROP_MAX px (широкий кроп CLIP 0.7 роста — до 336 px, как вход модели)
 CROP_KEEP_EXTRA = 3.0  # с сверх паузы и фаз подхода/отвода: столько хранятся кропы отсчётов
+MOTION_SAMPLES = 12  # скорость рамки — по стольким последним отсчётам задания (в пределах realtime.motion_window)...
+MOTION_MIN_SPAN = 0.3  # ...охватывающим не меньше стольких с
+MOTION_MAX = 1.5  # с: дальше последнего найденного отсчёта рамка не сдвигается (человека потеряли надолго)
 
 
 # ---------------------------------------------------------------- конфиг и кадры
@@ -272,6 +275,23 @@ class PersonJob:
         self.obs.append(o)
         self.box = o.box.astype(np.float64).copy()
 
+    def predict_box(self, t: float, window: float) -> np.ndarray:
+        """Рамка для кропа кадра t: последняя найденная, сдвинутая по скорости центра рамки за последние window с.
+        Идущий человек за 0.2 с уходит на треть ширины рамки: без сдвига кроп отстаёт, поза его теряет и на
+        следующих кадрах уже не находит (отсчёты обрываются как раз в паузе у рта, когда детектор тоже его не видит)."""
+        if window <= 0 or len(self.obs) < 3:
+            return self.box
+        last = self.obs[-1].t
+        pts = [o for o in self.obs[-MOTION_SAMPLES:] if o.t >= last - window - EPS]
+        if len(pts) < 3 or pts[-1].t - pts[0].t < MOTION_MIN_SPAN:
+            return self.box
+        ts = np.array([o.t for o in pts])
+        cx = np.array([(o.box[0] + o.box[2]) / 2 for o in pts])
+        cy = np.array([(o.box[1] + o.box[3]) / 2 for o in pts])
+        vx, vy = np.polyfit(ts, cx, 1)[0], np.polyfit(ts, cy, 1)[0]
+        dt = min(max(t - last, 0.0), MOTION_MAX)
+        return self.box + np.array([vx, vy, vx, vy]) * dt
+
     def finalize(self, now: float, final: bool, cfg: Config, roi: Roi) -> Tuple[List[Cycle], Optional[TrackSignal]]:
         """Новые законченные циклы по отсчётам последних finalize_window с (не раньше конца прошлого цикла).
         Цикл фиксируется, если после его конца прошло settle с (отвод руки и сглаживание уже не изменятся),
@@ -448,6 +468,28 @@ class CropPose:
 # ---------------------------------------------------------------- стадия 4 в потоке
 
 
+def keep_cycle(cfg: Config) -> Callable[[Cycle], bool]:
+    """Какой цикл с оценкой CLIP ниже appearance.min_score остаётся валидным: с прямым признаком, а при оценке
+    по событиям (realtime.objects_per_event) — любой: порог проверяет rt_events по лучшему циклу события."""
+    if cfg.realtime.objects_per_event:
+        return lambda c: True
+    return lambda c: has_evidence(c, cfg.episode)
+
+
+def rt_events(cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], cfg: Config) -> List[Event]:
+    """События режима: episodes.build_events, а при стадии 4 по событиям (realtime.objects_per_event) событие
+    без прямого признака отклоняется, если лучшая оценка CLIP его циклов ниже appearance.min_score. Порог по
+    каждому циклу (как в run.py) теряет true-клипы: у курящего вдалеке «похожа» на курение одна пауза из нескольких."""
+    events = build_events(cycles, signals, cfg.episode)
+    if not (cfg.realtime.objects and cfg.realtime.objects_per_event):
+        return events
+    for e in events:
+        scores = [c.appearance for c in e.cycles if np.isfinite(c.appearance)]
+        if e.passed and scores and max(scores) < cfg.appearance.min_score and                 not any(has_evidence(c, cfg.episode) for c in e.cycles):  # fmt: skip
+            e.passed, e.reject_reason = False, f"appearance:{max(scores):.2f}"
+    return events
+
+
 def store_crop(frame: np.ndarray, o: PersonObs, mouth, hand) -> StoredCrop:
     """Квадрат вокруг «рот + кисть» отсчёта (рот не найден — верх рамки) — для CLIP после фиксации цикла."""
     h = float(o.box[3] - o.box[1])
@@ -597,7 +639,7 @@ class RealtimeSession:
 
     def _dense_step(self, f: StreamFrame) -> None:
         jobs = list(self.active.values())
-        res = self._pose([(f.frame, j.box) for j in jobs], "pose_dense")
+        res = self._pose([(f.frame, j.predict_box(f.t, self.rc.motion_window)) for j in jobs], "pose_dense")
         self.stats["dense_frames"] += 1
         for job, r in zip(jobs, res):
             if r is not None:
@@ -618,7 +660,7 @@ class RealtimeSession:
             owners.append(tid)
         for tid, job in self.active.items():  # детектор пропустил человека с плотной проверкой — ведём по позе
             if tid not in owners:
-                items.append((f.frame, job.box))
+                items.append((f.frame, job.predict_box(f.t, rc.motion_window)))
                 owners.append(tid)
         has_job = [tid in self.active for tid in owners]
         res = self._pose(items, "pose_sparse")
@@ -734,7 +776,7 @@ class RealtimeSession:
             return
         t0 = time.perf_counter()
         for c, s in zip(todo, score_from_memory(job, todo, sig, self.cfg, self.encoder)):
-            apply_score(c, s, ac, lambda c: has_evidence(c, self.cfg.episode))
+            apply_score(c, s, ac, keep_cycle(self.cfg))
         self.tm["objects"] += time.perf_counter() - t0
         self.stats["scored_cycles"] += len(todo)
 
@@ -742,7 +784,7 @@ class RealtimeSession:
         """Сообщение о курении, как только у человека выполнилось правило эпизода (как в итоговом build_events);
         продолжение того же события повторно не сообщается. Задержка — от конца цикла, выполнившего правило."""
         cycles = sorted((c for j in self.jobs if j.tid == tid for c in j.cycles), key=lambda c: c.start)
-        passed = [e for e in build_events({tid: cycles}, {tid: sig}, self.cfg.episode) if e.passed]
+        passed = [e for e in rt_events({tid: cycles}, {tid: sig}, self.cfg) if e.passed]
         if not passed:
             return
         e = passed[-1]
@@ -841,7 +883,7 @@ def analyze(run: RtRun, cfg: Config, roi: Roi, jobs: Optional[List[PersonJob]] =
     signals = person_signals(jobs, cfg, roi)
     cycles = {tid: cs for tid, cs in cycles.items() if tid in signals}
     if replayed and cfg.realtime.objects and scorer is not None:
-        scorer.score(clip_id, video_path, cycles, signals, cfg.appearance, lambda c: has_evidence(c, cfg.episode),
+        scorer.score(clip_id, video_path, cycles, signals, cfg.appearance, keep_cycle(cfg),
                      run.meta.synthetic_from)  # fmt: skip
-    events: List[Event] = build_events(cycles, signals, cfg.episode)
+    events = rt_events(cycles, signals, cfg)
     return cycles, signals, events

@@ -214,17 +214,35 @@ class RealtimeConfig:
     track_iou: float = 0.1  # трекер 1 Гц: пара «трек — рамка» при IoU не ниже...
     track_dist: float = 0.8  # ...или расстоянии центров не больше доли высоты рамки
     track_max_missed: float = 5.0  # с без рамки — трек закрыт
-    trigger_dist: float = 1.5  # d (кисть→рот) в отсчёте 1 Гц ниже — плотная проверка области человека
+    trigger_dist: float = 2.0  # d (кисть→рот) в отсчёте 1 Гц ниже — плотная проверка области человека (1.5 теряет sm_7, 5)
     dense_fps: float = 5.0  # частота кадров плотной проверки
     dense_before: float = 3.0  # с назад: кадры из кольцевого буфера (подход руки ко рту уже прошёл)
     dense_after: float = 6.0  # с вперёд после последнего срабатывания триггера
+    motion_window: float = 1.0  # с: кроп плотной проверки сдвигается по скорости рамки за столько последних с; 0 — нет
     max_jobs: int = 12  # одновременно плотно проверяемых людей (бюджет реального времени)
     fill_budget: bool = False  # свободные слоты — плотная проверка и людей без срабатывания (ближе рука ко рту — раньше)
     finalize_window: float = 30.0  # с последних отсчётов, по которым на каждом шаге 1 Гц ищутся новые циклы
     start_hold: bool = True  # пауза в первые cycle.lookaround с потока не отбрасывается за no_approach (рука уже у рта)
     objects: bool = False  # стадия 4: CLIP по кропам «рот + кисть» в паузе (параметры — секция appearance)
-    # переопределения общих секций для этого режима, как --set («episode.min_cycles=1»); --set их перекрывает
-    rule_overrides: List[str] = field(default_factory=list)
+    objects_per_event: bool = True  # стадия 4: appearance.min_score — по лучшему циклу события, а не по каждому циклу
+    # переопределения общих секций для этого режима, как --set; --set их перекрывает. Подобраны tools/tune_rt.py
+    # на 34 клипах (все 19 true с событием), пояснения — в configs/default.yaml
+    rule_overrides: List[str] = field(
+        default_factory=lambda: [
+            "episode.min_cycles=1",
+            "episode.confidence_threshold=0.1",
+            "cycle.min_hold=0.2",
+            "cycle.max_hold=8",
+            "cycle.near_enter=1.2",
+            "cycle.near_exit=1.5",
+            "cycle.phone_ear_ratio=0",
+            "cycle.min_wrist_above_elbow=0",
+            "cycle.max_wrist_above_mouth=10",
+            "cycle.max_elbow_raise=10",
+            "cycle.min_face_visible=0",
+            "appearance.min_score=0.5",
+        ]
+    )
 
 
 @dataclass

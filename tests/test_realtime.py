@@ -13,11 +13,13 @@ from smokedet.realtime import (
     StreamFrame,
     Ticker,
     interp_box,
+    keep_cycle,
     letterbox,
     load_rt_config,
     person_cycles,
     person_signals,
     replay_job,
+    rt_events,
     sample_features,
     store_crop,
 )
@@ -196,3 +198,31 @@ def test_interp_box_follows_track():
     assert interp_box(ts, boxes, 8.0)[0] == 0  # до первого отсчёта — первая рамка
     assert interp_box(ts, boxes, 10.5)[0] == pytest.approx(20)
     assert interp_box(ts, boxes, 12.0)[0] == 30
+
+
+def test_predict_box_follows_walking_person():
+    job = PersonJob(1, BOX, 10.0)
+    for i in range(6):  # идёт вправо 150 px/с, отсчёты 5 Гц
+        job.add(PersonObs(i, i * 0.2, BOX + np.array([30.0 * i, 0, 30.0 * i, 0]), 0.9, pose(0.0)))
+    last = job.box.copy()
+    assert np.allclose(job.predict_box(1.0, 0.0), last)  # motion_window 0 — рамка стоит
+    assert job.predict_box(1.2, 1.0)[0] == pytest.approx(last[0] + 30)
+    assert job.predict_box(10.0, 1.0)[0] == pytest.approx(last[0] + 150 * 1.5)  # не дальше MOTION_MAX
+    still = PersonJob(2, BOX, 10.0)
+    for i in range(6):
+        still.add(PersonObs(i, i * 0.2, BOX.copy(), 0.9, pose(0.0)))
+    assert np.allclose(still.predict_box(2.0, 1.0), BOX)
+
+
+def test_objects_per_event_uses_best_cycle():
+    cfg = with_overrides(Config(), ["realtime.objects=true", "appearance.min_score=2"])
+    job, _ = stream_job([3.0, 10.0])
+    cycles, signals = person_cycles([job]), person_signals([job], cfg, Roi.full())
+    assert len(job.cycles) == 2 and keep_cycle(cfg)(job.cycles[0])  # слабый цикл остаётся валидным
+    job.cycles[0].appearance, job.cycles[1].appearance = 0.5, 3.0
+    assert [e.passed for e in rt_events(cycles, signals, cfg)] == [True]  # событие проходит по лучшему циклу
+    job.cycles[1].appearance = 1.0
+    (e,) = rt_events(cycles, signals, cfg)
+    assert not e.passed and e.reject_reason == "appearance:1.00"
+    # по циклам (как в analyze полного конвейера): цикл ниже порога без прямого признака не остаётся
+    assert not keep_cycle(with_overrides(cfg, ["realtime.objects_per_event=false"]))(job.cycles[0])
