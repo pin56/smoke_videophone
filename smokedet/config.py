@@ -223,7 +223,7 @@ class RealtimeConfig:
     fill_budget: bool = False  # свободные слоты — плотная проверка и людей без срабатывания (ближе рука ко рту — раньше)
     finalize_window: float = 30.0  # с последних отсчётов, по которым на каждом шаге 1 Гц ищутся новые циклы
     start_hold: bool = True  # пауза в первые cycle.lookaround с потока не отбрасывается за no_approach (рука уже у рта)
-    objects: bool = False  # стадия 4: CLIP по кропам «рот + кисть» в паузе (параметры — секция appearance)
+    objects: bool = True  # стадия 4: CLIP по кропам «рот + кисть» в паузе (параметры — секция appearance)
     objects_per_event: bool = True  # стадия 4: appearance.min_score — по лучшему циклу события, а не по каждому циклу
     # переопределения общих секций для этого режима, как --set; --set их перекрывает. Подобраны tools/tune_rt.py
     # на 34 клипах (все 19 true с событием), пояснения — в configs/default.yaml

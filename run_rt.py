@@ -3,11 +3,12 @@
 
 Кадр раз в секунду: лёгкий детектор людей → поза на кропах людей → у людей с рукой у рта плотная проверка
 области (~5 кадр/с, с кольцевым буфером назад) → циклы «рука ко рту → пауза → отвод» → правило эпизода.
-Опционально (--objects) — CLIP по кропам «рот + кисть» в паузе (стадия 4). Подробности — smokedet/realtime.py.
+Стадия 4 (realtime.objects, по умолчанию включена; --no-objects — без неё) — CLIP по кропам «рот + кисть» в паузе.
+Подробности — smokedet/realtime.py.
 
 Примеры:
     python run_rt.py --input videos/true/1.mp4 --camera-id cam1 --out runs/rt/one
-    python run_rt.py --inputs runs/rt/all.csv --out runs/rt/base [--objects] [--set realtime.trigger_dist=1.0]
+    python run_rt.py --inputs runs/rt/all.csv --out runs/rt/base [--no-objects] [--set realtime.trigger_dist=1.0]
 
 Выход в том же формате, что у run.py (export.PRED_COLUMNS/LOG_COLUMNS), поэтому работают evaluate.py и
 tools/eval_markup.py. realtime_log.csv — время по стадиям и загрузка (время обработки / длительность видео:
@@ -53,7 +54,8 @@ def parse_args(argv=None):
     p.add_argument("--config", default=str(ROOT / "configs" / "default.yaml"))
     p.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE", help="переопределить параметр")
     p.add_argument("--device", help="cpu | mps | 0 (по умолчанию auto)")
-    p.add_argument("--objects", action="store_true", help="стадия 4: CLIP по кропам «рот + кисть» (realtime.objects)")
+    p.add_argument("--objects", action=argparse.BooleanOptionalAction, default=None,
+                   help="стадия 4: CLIP по кропам «рот + кисть» (realtime.objects, по умолчанию — из конфига)")
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш отсчётов стадий 1–3")
     p.add_argument("--cache", help="папка кэша отсчётов (по умолчанию <out>/cache): перебор порогов повтором другого прогона")
     return p.parse_args(argv)
@@ -129,7 +131,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt="%H:%M:%S")
     overrides = list(args.set) + ([f"detector.device={args.device}"] if args.device else [])
-    overrides += ["realtime.objects=true"] if args.objects else []
+    overrides += [] if args.objects is None else [f"realtime.objects={str(args.objects).lower()}"]
     cfg = load_rt_config(args.config, overrides)
 
     if args.inputs:

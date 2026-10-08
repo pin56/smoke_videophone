@@ -2,12 +2,12 @@
 """Перебор порогов потокового режима (run_rt.py) повтором из кэша отсчётов, с оценкой по разметке пользователя.
 
     python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/base/cache \\
-        --grid cycle.near_enter=0.6,0.8,1.0 --grid episode.min_cycles=1,2 [--set ...] [--objects]
+        --grid cycle.near_enter=0.6,0.8,1.0 --grid episode.min_cycles=1,2 [--set ...] [--no-objects]
 
 Повтор проходит те же шаги фиксации циклов, что и поток (realtime.replay_job), поэтому меняться могут только
 пороги сигнала, циклов, правила и стадии 4 (cycle.*, episode.*, appearance.*, realtime.finalize_window); пороги
 стадий 1–3 (триггер, плотная проверка) входят в ключ кэша — для них нужен новый прогон run_rt.py. Стадия 4
-(--objects) при повторе перечитывает кадры пауз из видео, оценки CLIP кэшируются в памяти между точками сетки.
+(realtime.objects, --no-objects — без неё) при повторе перечитывает кадры пауз из видео, оценки CLIP кэшируются в памяти между точками сетки.
 
 Оценка — как tools/eval_markup.py (rasmetka_gt.csv, только время). На каждую точку: TP/FP/FN, F1, сколько
 true-видео с разметкой имеют хотя бы одно совпавшее событие, FP на false-видео, пропущенные true-видео.
@@ -65,13 +65,14 @@ def main(argv=None) -> int:
     p.add_argument("--config", default=str(ROOT / "configs" / "default.yaml"))
     p.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE")
     p.add_argument("--grid", action="append", default=[], metavar="SECTION.KEY=V1,V2")
-    p.add_argument("--objects", action="store_true", help="стадия 4 (CLIP) при повторе")
+    p.add_argument("--objects", action=argparse.BooleanOptionalAction, default=None,
+                   help="стадия 4 (CLIP) при повторе (по умолчанию — realtime.objects из конфига)")
     p.add_argument("--gt", default=str(ROOT / "rasmetka_gt.csv"))
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stdout.reconfigure(encoding="utf-8")
-    base = list(a.set) + (["realtime.objects=true"] if a.objects else [])
+    base = list(a.set) + ([] if a.objects is None else [f"realtime.objects={str(a.objects).lower()}"])
     cfg0 = load_rt_config(a.config, base)
     clips = read_inputs_csv(a.inputs)
     runs = {}
@@ -80,7 +81,7 @@ def main(argv=None) -> int:
         if run is None:
             sys.exit(f"{clip.clip_id}: нет кэша с этими параметрами стадий 1–3 в {a.cache}")
         runs[clip.clip_id] = run
-    det = RealtimeDetector(cfg0) if a.objects else None
+    det = RealtimeDetector(cfg0) if cfg0.realtime.objects else None
     gt = load_gt(a.gt, MERGE_GAP)
     gt_stems = {s for s, g in gt.items() if g.episodes}
     print("| точка | TP | FP | FN | F1 | true с TP | FP в false | дублей | пропущены |\n|---|---|---|---|---|---|---|---|---|")
