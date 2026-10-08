@@ -34,6 +34,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python tools/tune_markup.py --inputs runs/goal/all.csv --cache runs/goal/cache --grid appearance.min_score=4,6 --diag   # подбор по разметке пользователя (rasmetka_gt.csv), с проверкой «без камеры»
 .venv/bin/python tools/cvat_export.py --inputs ref.csv --cache runs/x/cache --out runs/cvat   # rasmetka_gt.csv + кэш треков -> XML CVAT
 .venv/bin/python tools/cvat_import.py runs/cvat_done --inputs ref.csv --cache runs/x/cache --out gt.csv   # выгрузки CVAT -> эталон
+.venv/bin/python tools/render_markup.py --cvat runs/cvat --out runs/markup   # ролики с разметкой (рамки эпизодов + отметки)
 ```
 
 Любой параметр переопределяется через `--set section.key=value`. Линтера и сборки в проекте нет.

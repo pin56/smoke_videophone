@@ -172,6 +172,16 @@ python tools/cvat_import.py runs/cvat_done --inputs data/ref.csv --cache runs/re
    Секунды считаются по pts из того же кэша (у CCTV-файлов с переменным fps `кадр/fps` уходит до 0.7 с).
    Если число кадров в CVAT и у трекера не совпадает, скрипт предупредит.
 
+Посмотреть разметку без CVAT — ролики с рамками эпизодов (номер человека, «проверить» при `check`), фазой текущей
+отметки (подъём руки / затяжка / опускание) и шкалой отметок внизу кадра:
+
+```bash
+python tools/render_markup.py --cvat runs/cvat --gt rasmetka_gt.csv --videos videos/true videos/false --out runs/markup
+```
+
+По умолчанию — клипы с эпизодами `smoking`; `--clips 1,sm_3` — выбранные, `--all` — все, `--persons` — ещё и треки
+людей. Подходит и для правленой в CVAT выгрузки (XML в одной папке; без `index.csv` видео ищется по `<source>`).
+
 ## Разметка циклов (для обучения классификатора)
 
 ```bash
