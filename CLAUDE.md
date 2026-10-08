@@ -40,6 +40,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python tools/export_cycles.py --inputs ref.csv --out data/labeling/set1   # кадры циклов для ручной разметки
 .venv/bin/python tools/label_server.py --data data/labeling/set1   # веб-разметчик циклов (метки -> labels.jsonl; обучение — tools/train_cycle_clf.py)
 .venv/bin/python tools/draw_roi.py --video data/clip.mp4 --out data/roi_cam1.json   # маска ROI мышкой
+.venv/bin/python tools/render_markup.py --cvat runs/cvat --out runs/markup   # ролики с разметкой (рамки эпизодов + отметки)
 ```
 
 Любой параметр переопределяется через `--set section.key=value`. Линтера и сборки в проекте нет.
