@@ -85,6 +85,16 @@ def select_device(pref: str) -> str:
     return "cpu"
 
 
+def refine_model_path(pose_model: str) -> str:
+    """Модель уточнения позы на кропах. Уточнение идёт батчем кропов, а TensorRT-engine позы собран на батч 1
+    (tools/export_trt.py), поэтому для «<имя>-<суффикс>.engine» берётся «<имя>.pt» рядом с ним."""
+    p = Path(pose_model)
+    if p.suffix != ".engine":
+        return pose_model
+    base = p.stem.split("-fp16")[0].split("-int8")[0]
+    return str(p.with_name(base + ".pt"))
+
+
 def half_kwargs(enabled: bool, device: str) -> dict:
     """Аргументы FP16 для predict/track ultralytics: только на CUDA (на cpu и mps не используется).
     В ultralytics 8.4 точность задаёт quantize=16: half (и явный half=False) устарел и даёт предупреждение
@@ -115,7 +125,7 @@ class PoseTracker:
         if self.model.task != "pose":
             raise ValueError(f"{cfg.pose_model}: нужна pose-модель, получена задача '{self.model.task}'")
         # отдельный экземпляр: predict() на основной модели запустил бы колбэки трекера на кропах
-        self.refiner = YOLO(cfg.pose_model) if cfg.refine_small else None
+        self.refiner = YOLO(refine_model_path(cfg.pose_model)) if cfg.refine_small else None
         self._half = half_kwargs(cfg.half, device)
 
     def _track_frame(self, frame: np.ndarray, first: bool):

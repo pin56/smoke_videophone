@@ -94,7 +94,8 @@ def main(argv=None) -> int:
     points = list(itertools.product(*[vals for _, vals in axes])) or [()]
 
     def overrides(point) -> List[str]:
-        return [f"{k}={v.replace('|', ',')}" for (k, _), v in zip(axes, point)]
+        # «a|b» — YAML-список [a, b]: строка «a,b» стала бы списком из одного элемента (config._coerce)
+        return [f"{k}=[{v.replace('|', ', ')}]" if "|" in v else f"{k}={v}" for (k, _), v in zip(axes, point)]
 
     for pt in points:  # опечатки в ключах — до трекинга
         with_overrides(base, overrides(pt))
