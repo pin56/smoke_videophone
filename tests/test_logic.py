@@ -9,7 +9,7 @@ from smokedet.config import (
 )  # fmt: skip
 from smokedet.cycles import detect_cycles
 from smokedet.episodes import build_events
-from smokedet.flash import Flash, LightMeter, attach_flashes, find_flashes
+from smokedet.flash import Flash, LightMeter, attach_flashes, background_median, find_flashes
 from smokedet.evaluation import EvalParams, Item, evaluate
 from smokedet.geometry import TrackSignal, build_signal
 from smokedet.roi import Roi
@@ -340,6 +340,15 @@ def test_light_meter():
     door[100:300, 156:186] = 255  # светлая дверь рядом с человеком, но не у лица
     zone, ring, _ = meter.measure(door, 3.2, box, k)[0]
     assert zone == 0 and ring == pytest.approx(6000, rel=0.15)
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 30, 31])
+def test_background_median_matches_numpy(n):
+    rng = np.random.default_rng(n)
+    frames = [rng.integers(0, 256, (37, 53), dtype=np.uint8) for _ in range(n)]
+    want = np.median(np.stack(frames), axis=0).astype(np.int16)
+    got = background_median(frames, "cpu")
+    assert got.dtype == np.int16 and np.array_equal(got, want)
 
 
 def test_build_signal_light():

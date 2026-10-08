@@ -167,7 +167,7 @@ class PoseTracker:
     def run(self, meta: VideoMeta, stride: int, progress: bool = True) -> TrackSet:
         from .flash import LightMeter  # flash → geometry → tracking: импорт здесь, иначе цикл
 
-        meter = LightMeter()
+        meter = LightMeter(self.device)
         tracks: Dict[int, List[PersonObs]] = {}
         n_processed = 0
         start = time.time()
