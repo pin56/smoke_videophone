@@ -13,7 +13,9 @@ frames — u<k> k кадров равномерно по паузе (как plan
 views — номера видов из --views через «+» (0 — узкий 0.35, 1 — широкий 0.7, 2 — тесный 0.2 со словарём узкого);
 agg — max (как в appearance.cycle_score), top2 (среднее двух лучших), mean; hand — вес лучшей оценки кисти в покое
 (кадры до подхода и после отвода, кроп по кисти, HAND_PROMPTS), diff — вес вычитаемой средней оценки рта в покое;
-prompts — словарь из PROMPT_SETS (base — как в appearance.py); bridge — валидный цикл с оценкой ниже не входит в события (none — входит).
+prompts — словарь из PROMPT_SETS (base — как в appearance.py); bridge — валидный цикл с оценкой ниже не входит в события (none — входит);
+stop — ранний останов CLIP цикла по достижении оценки (none — все кадры); probe — вес логита линейного зонда
+(обучен с исключением клипа, см. probe_scores), pc — его C.
 Остальные ключи — как --set.
 """
 from __future__ import annotations
@@ -246,15 +248,80 @@ def aggregate(s: np.ndarray, agg: str) -> float:
     raise ValueError(f"lab.agg: {agg}")
 
 
-def cycle_appearance(rec: dict, fs, lab: dict) -> float:
-    """Оценка цикла: сумма по видам агрегата по выбранным кадрам паузы; плюс hand × лучшая оценка кисти в покое,
-    минус diff × средняя оценка рта в покое (базовая линия человека и камеры)."""
+def coarse_to_fine(n: int) -> list:
+    """Порядок обхода n кадров: середина, края, затем середины промежутков (оценка рано видит всю паузу)."""
+    order, seen, parts = [], set(), [(0, n - 1)]
+    for i in (n // 2, 0, n - 1):
+        if i not in seen:
+            order.append(i), seen.add(i)
+    while len(order) < n:
+        nxt = []
+        for a, b in sorted({(min(x, y), max(x, y)) for x, y in zip(sorted(seen), sorted(seen)[1:])}):
+            m = (a + b) // 2
+            if m not in seen:
+                order.append(m), seen.add(m)
+            nxt.append(m)
+        if not nxt:
+            order += [i for i in range(n) if i not in seen]
+    return order[:n]
+
+
+def cycle_appearance(rec: dict, fs, lab: dict):
+    """Оценка цикла и число кадров паузы, на которые ушёл CLIP: сумма по видам агрегата по выбранным кадрам; плюс
+    hand × лучшая оценка кисти в покое, минус diff × средняя оценка рта в покое (базовая линия человека и камеры).
+    stop — ранний останов: кадры от грубого к точному, CLIP прекращается, как только оценка не ниже stop."""
     hold, rest = fs
     ks = pick_frames(rec, lab["frames"])
-    s = sum(aggregate(hold[ks, v], lab["agg"]) for v in lab["views"])
+    extra = 0.0
     if rest is not None and len(rest):
-        s += lab["hand"] * float(rest[:, 0].max()) - lab["diff"] * float(rest[:, 1].mean())
-    return s
+        extra = lab["hand"] * float(rest[:, 0].max()) - lab["diff"] * float(rest[:, 1].mean())
+    if lab["stop"] is None:
+        return sum(aggregate(hold[ks, v], lab["agg"]) for v in lab["views"]) + extra, len(ks)
+    used = []
+    for i in coarse_to_fine(len(ks)):
+        used.append(ks[i])
+        s = sum(aggregate(hold[used, v], lab["agg"]) for v in lab["views"]) + extra
+        if s >= lab["stop"] and (lab["agg"] != "top2" or len(used) >= 2):
+            break
+    return s, len(used)
+
+
+def cycle_labels(bank: dict, gt: dict, stems: dict, pad: float = 3.0) -> dict:
+    """Метка цикла для зонда: 1 — в true-клипе пересекает эпизод эталона (±pad с), 0 — клип false или интервал
+    NOSMOKE; остальные (курение вне разметки, клипы без эталона) в обучение не идут."""
+    out = {}
+    for key, rec in bank["recs"].items():
+        g = gt.get(stems.get(key[0]))
+        if g is None:
+            continue
+        a, b = float(key[3]), max(float(key[4]), float(key[3]) + 0.5)  # пауза цикла (рука у рта)
+        if g.folder == "false":
+            out[key] = 0
+        elif any(min(b, e + pad) > max(a, s - pad) for s, e, _ in g.episodes):
+            out[key] = 1
+        elif any(min(b, e) > max(a, s) for s, e in g.nosmoke):
+            out[key] = 0
+    return out
+
+
+def probe_scores(bank: dict, labels: dict, views, c: float) -> dict:
+    """Линейный зонд по векторам паузы (среднее по кадрам каждого вида) с исключением клипа: оценка цикла —
+    логит модели, обученной без его клипа (у каждого клипа своя камера, так зонд не может выучить камеру)."""
+    from sklearn.linear_model import LogisticRegression
+
+    keys = list(bank["recs"])
+    x = np.stack([np.concatenate([bank["recs"][k]["emb"][:, v].astype(np.float32).mean(0) for v in views]) for k in keys])
+    x /= np.linalg.norm(x, axis=1, keepdims=True)
+    clip_of = np.array([k[0] for k in keys])
+    y = np.array([labels.get(k, -1) for k in keys])
+    out = {}
+    for cid in np.unique(clip_of):
+        tr = (clip_of != cid) & (y >= 0)
+        m = LogisticRegression(C=c, class_weight="balanced", max_iter=2000).fit(x[tr], y[tr])
+        te = np.nonzero(clip_of == cid)[0]
+        for i, v in zip(te, m.decision_function(x[te])):
+            out[keys[i]] = float(v)
+    return out
 
 
 def parse_grid(items):
@@ -283,11 +350,22 @@ def score(a) -> int:
 
     gt = load_gt(a.gt, MERGE_GAP)
     gt_stems = {s for s, g in gt.items() if g.episodes}
+    stems = {clip.clip_id: canonical_stem(Path(clip.video_path).stem) for clip, *_ in clips}
+    labels, by_c = None, {}
+
+    def probes(c):
+        nonlocal labels
+        if labels is None:
+            labels = cycle_labels(bank, gt, stems)
+            log.info("зонд: циклов с меткой %d, положительных %d", len(labels), sum(labels.values()))
+        if c not in by_c:
+            by_c[c] = probe_scores(bank, labels, [0, 1], c)
+        return by_c[c]
     print(f"эмбеддинги {a.emb}: {bank['model']}, виды {bank['views']}, циклов {len(bank['recs'])}")
     print("| точка | TP | FP | FN | F1 | true с TP | затяжек | время | FP в false | дублей | кропов | пропущены |\n"
           "|---|---|---|---|---|---|---|---|---|---|---|---|")  # fmt: skip
     for point in parse_grid(a.grid):
-        lab = {"frames": "u8", "views": "0+1", "agg": "max", "hand": 0.0, "diff": 0.0, "bridge": "none", "prompts": "base"}
+        lab = {"frames": "u8", "views": "0+1", "agg": "max", "hand": 0.0, "diff": 0.0, "bridge": "none", "prompts": "base", "stop": "none", "probe": 0.0, "pc": 0.1}
         sets = []
         for k, v in point.items():
             if k.startswith("lab."):
@@ -297,6 +375,9 @@ def score(a) -> int:
         lab["views"] = [int(v) for v in str(lab["views"]).split("+")]
         lab["hand"], lab["diff"] = float(lab["hand"]), float(lab["diff"])
         lab["bridge"] = None if lab["bridge"] == "none" else float(lab["bridge"])
+        lab["stop"] = None if lab["stop"] == "none" else float(lab["stop"])
+        lab["probe"], lab["pc"] = float(lab["probe"]), float(lab["pc"])
+        lab["probe_scores"] = probes(lab["pc"]) if lab["probe"] else None
         cfg = load_rt_config(a.config, a.set + sets)
         res, missed, n_true, fp_false, n_crops = evaluate_point(gt, gt_stems, clips, cfg, bank, fscores(lab["prompts"]), lab)
         t = res["total"]
@@ -321,8 +402,11 @@ def evaluate_point(gt, gt_stems, clips, cfg, bank, fscores, lab):
                 rec = bank["recs"].get(key)
                 if rec is None:
                     continue
-                n_crops += len(pick_frames(rec, lab["frames"])) * len(lab["views"])
-                ap.apply_score(c, cycle_appearance(rec, fscores[key], lab), cfg.appearance, keep)
+                score, used = cycle_appearance(rec, fscores[key], lab)
+                if lab["probe_scores"] is not None:
+                    score += lab["probe"] * lab["probe_scores"][key]
+                n_crops += used * len(lab["views"])
+                ap.apply_score(c, score, cfg.appearance, keep)
                 if lab["bridge"] is not None and c.valid and c.appearance < lab["bridge"]:
                     c.valid, c.reject_reason = False, "bridge"  # не курение на вид: не продлевает и не склеивает события
         events = rt_events(cycles, signals, cfg)
