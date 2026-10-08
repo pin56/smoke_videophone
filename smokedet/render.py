@@ -32,6 +32,20 @@ def _label(frame, text, org, color, scale, thick):
     cv2.putText(frame, text, (x + 2, y - base), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick, cv2.LINE_AA)
 
 
+def _phase(cs: List[Cycle], t: float):
+    """Фаза цикла человека в момент t: (текст, цвет, цикл) или None."""
+    for c in cs:
+        if c.start <= t <= c.end + (2.0 if not c.valid else 0.0):
+            if not c.valid:
+                return f"REJECT {c.reject_reason}", GRAY, c
+            if t < c.hold_start:
+                return "HAND TO MOUTH", YELLOW, c
+            if t <= c.hold_end:
+                return f"HOLD {t - c.hold_start:.1f}s", ORANGE, c
+            return "HAND DOWN", YELLOW, c
+    return None
+
+
 def _start_datetime(start_time: Optional[str]) -> Optional[datetime]:
     if not start_time:
         return None
@@ -61,6 +75,7 @@ def render_video(
     lit = {tid: [(f.start, f.end) for f in fs] for tid, fs in (flashes or {}).items()}
     puffs = {tid: [(c.vapor_t, c.vapor_t + 1.0) for c in cs if c.vapor] for tid, cs in cycles.items()}
     shown = [e for e in events if e.passed]
+    all_cycles = {tid: sorted(cs, key=lambda c: c.start) for tid, cs in cycles.items()}
     t0 = _start_datetime(start_time)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +101,7 @@ def render_video(
             x1, y1, x2, y2 = sig.boxes[i].astype(int)
             event = next((e for e in shown if e.track_id == tid and e.start <= t <= e.end), None)
             in_hold = any(a <= t <= b for a, b in holds.get(tid, []))
+            phase = _phase(all_cycles.get(tid, []), t)
             if event is not None:
                 alarms += 1
                 cv2.rectangle(frame, (x1, y1), (x2, y2), RED, 2 * thick)
@@ -94,14 +110,42 @@ def render_video(
                 color = YELLOW if in_hold else (GREEN if sig.valid[i] else GRAY)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
                 _label(frame, f"id{tid}", (x1, y1 - 2), color, fscale * 0.8, thick)
+            small = fscale * 0.7
+            row = y2 + 4
+            step = int(18 * small * 1.6) + 2
             if any(a <= t <= b for a, b in lit.get(tid, [])):
-                _label(frame, "FLASH", (x1, y2 + 4), ORANGE, fscale * 0.8, thick)
+                _label(frame, "FLASH", (x1, row), ORANGE, small, thick)
+                row += step
             elif any(a <= t <= b for a, b in puffs.get(tid, [])):
-                _label(frame, "VAPOR", (x1, y2 + 4), WHITE, fscale * 0.8, thick)
+                _label(frame, "VAPOR", (x1, row), WHITE, small, thick)
+                row += step
+            if phase is not None:
+                text, pcolor, c = phase
+                _label(frame, text, (x1, row), pcolor, small, thick)
+                row += step
+                info = []
+                if not np.isnan(c.appearance):
+                    info.append(f"clip {c.appearance:.1f}")
+                if c.objects:
+                    name, conf = max(c.objects.items(), key=lambda kv: kv[1])
+                    info.append(f"{name} {conf:.2f}")
+                if info:
+                    _label(frame, " ".join(info), (x1, row), pcolor, small, thick)
+                    row += step
             if not np.isnan(sig.mouth[i]).any():
                 cv2.circle(frame, tuple(sig.mouth[i].astype(int)), 2 * thick, WHITE, -1)
             if not np.isnan(sig.hand[i]).any():
-                cv2.circle(frame, tuple(sig.hand[i].astype(int)), 2 * thick, YELLOW if in_hold else WHITE, -1)
+                hand = tuple(sig.hand[i].astype(int))
+                cv2.circle(frame, hand, 2 * thick, YELLOW if in_hold else WHITE, -1)
+                if not np.isnan(sig.mouth[i]).any():
+                    cv2.line(frame, hand, tuple(sig.mouth[i].astype(int)), YELLOW if in_hold else GRAY, thick, cv2.LINE_AA)
+                    if not np.isnan(sig.d[i]):
+                        _label(frame, f"d={sig.d[i]:.2f}", (hand[0] + 6, hand[1]), WHITE, small, thick)
+        n_cyc = sum(1 for cs in cycles.values() for c in cs if c.valid and c.end <= t)
+        n_rej = sum(1 for cs in cycles.values() for c in cs if not c.valid and c.end <= t)
+        n_ev = sum(1 for e in shown if e.end <= t or e.start <= t)
+        _label(frame, f"people {len(current)}  cycles {n_cyc}  rejected {n_rej}  events {n_ev}", (8, 8 + int(40 * fscale)),
+               GREEN, fscale * 0.8, thick)
         stamp = (t0 + timedelta(seconds=t)).strftime("%Y-%m-%d %H:%M:%S") if t0 else f"t={t:8.2f}s"
         banner = f"{title}  {stamp}" + (f"  ALARM x{alarms}" if alarms else "")
         _label(frame, banner, (8, 8), RED if alarms else WHITE, fscale, thick)
