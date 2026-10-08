@@ -113,6 +113,30 @@ def cycle_score(view_scores: Sequence[np.ndarray]) -> float:
     return float(sum(np.max(s) for s in view_scores))
 
 
+def rescuable(c: Cycle, cfg: AppearanceConfig) -> bool:
+    """Невалидный цикл, который высокая оценка может вернуть: отброшен верификатором за предмет из
+    rescue_objects или при поиске циклов только по причинам из rescue_reasons."""
+    if c.valid:
+        return False
+    kind, _, obj = c.reject_reason.partition(":")
+    if kind in ("object", "track_object"):
+        return obj in cfg.rescue_objects
+    return all(r in cfg.rescue_reasons for r in c.reject_reason.split(","))
+
+
+def apply_score(c: Cycle, score: float, cfg: AppearanceConfig, keep: Optional[Callable[[Cycle], bool]] = None) -> None:
+    """Оценка цикла -> appearance, look и валидность (min_score, rescue_score); keep(c) — оставить цикл
+    с низкой оценкой (прямой признак)."""
+    c.appearance = score
+    c.look = bool(c.appearance >= cfg.direct_score)  # nan -> False
+    if not c.valid:
+        if c.appearance >= cfg.rescue_score:
+            c.valid, c.rescued_from, c.reject_reason = True, c.reject_reason, ""
+    elif c.appearance < cfg.min_score and not (keep and keep(c)):
+        c.valid = False
+        c.reject_reason = f"appearance:{c.appearance:.2f}"
+
+
 class ClipEncoder:
     """CLIP (OpenAI) с векторами описаний обоих видов. На CUDA веса в FP16 (так их грузит clip.load)."""
 
@@ -199,17 +223,7 @@ class AppearanceScorer:
         rescue_objects или только по причинам из rescue_reasons, тоже оценивается и с оценкой не ниже rescue_score
         снова валиден (rescued_from)."""
         digest = signals_digest(signals)
-        objects, reasons = set(cfg.rescue_objects), set(cfg.rescue_reasons)
-
-        def rescuable(c: Cycle) -> bool:
-            if c.valid:
-                return False
-            kind, _, obj = c.reject_reason.partition(":")
-            if kind in ("object", "track_object"):
-                return obj in objects
-            return all(r in reasons for r in c.reject_reason.split(","))
-
-        scored = [c for cs in cycles.values() for c in cs if c.valid or rescuable(c)]
+        scored = [c for cs in cycles.values() for c in cs if c.valid or rescuable(c, cfg)]
         todo = [c for c in scored if self._key(clip_id, c, cfg, digest) not in self.cache]
         if todo:
             encoder = self._encoder(cfg)
@@ -218,14 +232,7 @@ class AppearanceScorer:
             for c, s in zip(todo, self._score_cycles(video_path, todo, signals, cfg, encoder, synthetic_from)):
                 self.cache[self._key(clip_id, c, cfg, digest)] = s
         for c in scored:
-            c.appearance = self.cache[self._key(clip_id, c, cfg, digest)]
-            c.look = bool(c.appearance >= cfg.direct_score)  # nan -> False
-            if not c.valid:
-                if c.appearance >= cfg.rescue_score:
-                    c.valid, c.rescued_from, c.reject_reason = True, c.reject_reason, ""
-            elif c.appearance < cfg.min_score and not (keep and keep(c)):
-                c.valid = False
-                c.reject_reason = f"appearance:{c.appearance:.2f}"
+            apply_score(c, self.cache[self._key(clip_id, c, cfg, digest)], cfg, keep)
 
     @staticmethod
     def _score_cycles(

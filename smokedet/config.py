@@ -195,6 +195,36 @@ class EpisodeConfig:
 
 
 @dataclass
+class RealtimeConfig:
+    """Потоковый режим (run_rt.py, smokedet/realtime.py): 1 Гц детектор людей → поза на кропах → плотная
+    проверка области у людей с рукой у рта. Сигнал, циклы и правило эпизода — общие секции geometry/cycle/episode
+    (для режима их можно переопределить в rule_overrides), стадия 4 — секция appearance."""
+
+    sparse_fps: float = 1.0  # частота стадий 1–2: детектор людей и поза на кропах всех людей
+    det_model: str = "weights/yolo11n.pt"  # лёгкий детектор людей (COCO, класс 0)
+    det_imgsz: int = 1280  # люди в CCTV мелкие; раз в секунду большой вход почти ничего не стоит
+    det_conf: float = 0.25
+    pose_model: str = "weights/yolo11m-pose.pt"  # поза на кропах людей (стадии 2–3)
+    pose_imgsz: int = 320
+    pose_conf: float = 0.1
+    half: bool = True  # FP16, только на CUDA
+    crop_pad: float = 0.25  # кроп человека: рамка плюс такая доля её сторон с каждой стороны
+    match_iou: float = 0.3  # поза в кропе — этого человека, если IoU её рамки с рамкой человека не ниже
+    track_iou: float = 0.1  # трекер 1 Гц: пара «трек — рамка» при IoU не ниже...
+    track_dist: float = 0.8  # ...или расстоянии центров не больше доли высоты рамки
+    track_max_missed: float = 5.0  # с без рамки — трек закрыт
+    trigger_dist: float = 1.2  # d (кисть→рот) в отсчёте 1 Гц ниже — плотная проверка области человека
+    dense_fps: float = 5.0  # частота кадров плотной проверки
+    dense_before: float = 3.0  # с назад: кадры из кольцевого буфера (подход руки ко рту уже прошёл)
+    dense_after: float = 6.0  # с вперёд после последнего срабатывания триггера
+    max_jobs: int = 6  # одновременно плотно проверяемых людей (бюджет реального времени)
+    finalize_window: float = 30.0  # с последних отсчётов, по которым на каждом шаге 1 Гц ищутся новые циклы
+    objects: bool = False  # стадия 4: CLIP по кропам «рот + кисть» в паузе (параметры — секция appearance)
+    # переопределения общих секций для этого режима, как --set («episode.min_cycles=1»); --set их перекрывает
+    rule_overrides: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ReportConfig:
     team: str = ""
     model_version: str = "smokedet-0.1.0"
@@ -220,6 +250,7 @@ SECTIONS = {
     "vapor": VaporConfig,
     "appearance": AppearanceConfig,
     "episode": EpisodeConfig,
+    "realtime": RealtimeConfig,
     "report": ReportConfig,
 }
 
@@ -236,6 +267,7 @@ class Config:
     vapor: VaporConfig = field(default_factory=VaporConfig)
     appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
+    realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
 
     def to_dict(self) -> Dict[str, Any]:
