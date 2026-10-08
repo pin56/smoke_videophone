@@ -170,6 +170,8 @@ realtime:                   # потоковый режим run_rt.py (smokedet/
   start_hold: true          # пауза в первые cycle.lookaround с потока не отбрасывается за no_approach (рука уже у рта)
   objects: true             # стадия 4: CLIP по кропам «рот + кисть» в паузе (параметры — секция appearance)
   objects_per_event: true   # стадия 4: appearance.min_score — по лучшему циклу события, а не по каждому циклу
+  many_cycles: 5            # стадия 4 по событиям: у события с таким числом оценённых CLIP циклов (0 — нет)...
+  many_min_score: 10.0      # ...лучшая оценка не ниже: много подходов руки без сигареты — питьё, касание лица
   rule_overrides:           # переопределения общих секций для режима, как --set; --set их перекрывает (подбор — tools/tune_rt.py)
     - episode.min_cycles=1  # одного цикла достаточно: второй при 1 Гц + плотной проверке часто не виден
     - episode.confidence_threshold=0.1  # уверенность одиночного цикла не выше 0.45·quality

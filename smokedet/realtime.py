@@ -46,7 +46,8 @@ log = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
 # поля секции realtime, от которых не зависят отсчёты стадий 1–3 (не входят в ключ кэша, меняются повтором)
-RULE_FIELDS = ("objects", "objects_per_event", "rule_overrides", "finalize_window", "start_hold")
+RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", "rule_overrides", "finalize_window",
+               "start_hold")  # fmt: skip
 DUP_IOU = 0.8  # два задания плотной проверки с такими рамками — один человек (рамки позы сошлись на нём)
 EPS = 1e-6
 PREFETCH = 8  # кадров плотной сетки, декодированных заранее (поток чтения работает, пока занят GPU)
@@ -479,15 +480,52 @@ def keep_cycle(cfg: Config) -> Callable[[Cycle], bool]:
 def rt_events(cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], cfg: Config) -> List[Event]:
     """События режима: episodes.build_events, а при стадии 4 по событиям (realtime.objects_per_event) событие
     без прямого признака отклоняется, если лучшая оценка CLIP его циклов ниже appearance.min_score. Порог по
-    каждому циклу (как в run.py) теряет true-клипы: у курящего вдалеке «похожа» на курение одна пауза из нескольких."""
+    каждому циклу (как в run.py) теряет true-клипы: у курящего вдалеке «похожа» на курение одна пауза из нескольких.
+    Если CLIP оценил не меньше realtime.many_cycles циклов события, лучшая оценка должна быть не ниже
+    many_min_score: человек много раз подносит руку ко рту, а сигареты не видно ни разу — питьё, касание лица."""
     events = build_events(cycles, signals, cfg.episode)
-    if not (cfg.realtime.objects and cfg.realtime.objects_per_event):
+    rc = cfg.realtime
+    if not (rc.objects and rc.objects_per_event):
         return events
     for e in events:
         scores = [c.appearance for c in e.cycles if np.isfinite(c.appearance)]
-        if e.passed and scores and max(scores) < cfg.appearance.min_score and                 not any(has_evidence(c, cfg.episode) for c in e.cycles):  # fmt: skip
-            e.passed, e.reject_reason = False, f"appearance:{max(scores):.2f}"
+        if not (e.passed and scores) or any(has_evidence(c, cfg.episode) for c in e.cycles):
+            continue
+        best = max(scores)
+        if best < cfg.appearance.min_score:
+            e.passed, e.reject_reason = False, f"appearance:{best:.2f}"
+        elif rc.many_cycles > 0 and len(scores) >= rc.many_cycles and best < rc.many_min_score:
+            e.passed, e.reject_reason = False, f"many_cycles:{len(scores)}:{best:.2f}"
     return events
+
+
+AlertState = Tuple[float, float, bool]  # начало и конец события человека, о котором сообщено; действует ли тревога
+
+
+def alert_change(events: List[Event], st: Optional[AlertState]) -> Tuple[Optional[AlertState], Optional[str]]:
+    """События человека (по времени) и прежнее состояние тревоги -> новое состояние и сообщение: "alert" —
+    правило эпизода выполнилось (новое событие или снятое снова подтвердилось), "withdrawn" — событие, о котором
+    сообщили, правило больше не выполняет (стадия 4: много циклов без сигареты), None — без изменений. Меняется
+    только последнее событие: новые циклы дописываются в конец."""
+    if st is not None and st[2] and events:
+        last = events[-1]
+        if not last.passed and last.start <= st[1] + EPS:
+            return (st[0], last.end, False), "withdrawn"
+    passed = [e for e in events if e.passed]
+    if not passed:
+        return st, None
+    e = passed[-1]
+    if st is not None and e.start <= st[1] + EPS and (st[2] or e.end <= st[1] + EPS):
+        return ((e.start, e.end, True) if st[2] else st), None  # продолжение или прежнее событие до снятого
+    return (e.start, e.end, True), "alert"
+
+
+def dropped_alert(st: Optional[AlertState], left: List[Cycle]) -> bool:
+    """Снять ли тревогу человека, чьё задание удалено как дубль: тревога действует, а среди оставшихся у него
+    циклов (других заданий) нет валидных на отрезке события, о котором сообщено."""
+    if st is None or not st[2]:
+        return False
+    return not any(c.valid and c.start <= st[1] + EPS and c.end >= st[0] - EPS for c in left)
 
 
 def store_crop(frame: np.ndarray, o: PersonObs, mouth, hand) -> StoredCrop:
@@ -542,7 +580,7 @@ class RtRun:
     timings: Dict[str, float] = field(default_factory=dict)
     wall_time: float = 0.0
     cache_key: str = ""
-    alerts: List[dict] = field(default_factory=list)  # моменты, когда правило эпизода выполнилось в потоке
+    alerts: List[dict] = field(default_factory=list)  # тревоги в потоке и их снятия (withdrawn), alert_change
 
 
 def inference_hash(cfg: Config) -> str:
@@ -603,7 +641,7 @@ class RealtimeSession:
         self.tm = dict.fromkeys(STAGES, 0.0)
         self.alerts: List[dict] = []
         self.t0: Optional[float] = None  # время первого кадра потока
-        self._alerted: Dict[int, float] = {}  # человек -> конец последнего события, о котором сообщено
+        self._alerted: Dict[int, AlertState] = {}  # человек -> последнее событие, о котором сообщено (alert_change)
 
     # -- вспомогательное
     def _pose(self, items, key: str):
@@ -685,7 +723,7 @@ class RealtimeSession:
                     triggered.append((d, tid, r))
             elif not dense:
                 idle.append((d if np.isfinite(d) else math.inf, tid, r))
-        self._drop_duplicates()
+        self._drop_duplicates(f.t)
         dropped = self._start_jobs(f, sorted(triggered, key=lambda x: x[0]))
         if rc.fill_budget and not dropped:
             # свободный бюджет: плотно проверяются и люди без срабатывания (ближе рука ко рту — раньше);
@@ -696,8 +734,9 @@ class RealtimeSession:
             self._start_jobs(f, sorted(idle, key=lambda x: x[0]), budget=True)
         self._finalize(f.t)
 
-    def _drop_duplicates(self) -> None:
-        """Два задания на одного человека (детектор дал две рамки, трекер — два id): остаётся старшее."""
+    def _drop_duplicates(self, now: float) -> None:
+        """Два задания на одного человека (детектор дал две рамки, трекер — два id): остаётся старшее.
+        События удалённого задания в итоги не попадут, поэтому его тревога снимается (dropped_alert)."""
         jobs = sorted(self.active.values(), key=lambda j: self.jobs.index(j))
         for i, a in enumerate(jobs):
             for b in jobs[i + 1 :]:
@@ -707,6 +746,9 @@ class RealtimeSession:
                     if self.last_job.get(b.tid) is b:
                         del self.last_job[b.tid]
                     self.stats["jobs_duplicate"] += 1
+                    left = [c for j in self.jobs if j.tid == b.tid for c in j.cycles]
+                    if dropped_alert(self._alerted.get(b.tid), left):
+                        self._withdraw(b.tid, now, self._alerted[b.tid], f"duplicate:{a.tid}")
 
     def _start_jobs(self, f: StreamFrame, candidates, budget: bool = False) -> int:
         """Задания для кандидатов (по порядку, пока есть слоты); возвращает число не получивших слот."""
@@ -782,19 +824,27 @@ class RealtimeSession:
 
     def _alert(self, tid: int, now: float, sig: TrackSignal) -> None:
         """Сообщение о курении, как только у человека выполнилось правило эпизода (как в итоговом build_events);
-        продолжение того же события повторно не сообщается. Задержка — от конца цикла, выполнившего правило."""
+        продолжение того же события повторно не сообщается, а если событие правило больше не выполняет — тревога
+        снимается (alert_change). Задержка — от конца цикла, выполнившего правило."""
         cycles = sorted((c for j in self.jobs if j.tid == tid for c in j.cycles), key=lambda c: c.start)
-        passed = [e for e in rt_events({tid: cycles}, {tid: sig}, self.cfg) if e.passed]
-        if not passed:
+        events = sorted(rt_events({tid: cycles}, {tid: sig}, self.cfg), key=lambda e: e.start)
+        st, msg = alert_change(events, self._alerted.get(tid))
+        if st is not None:
+            self._alerted[tid] = st
+        if msg is None:
             return
-        e = passed[-1]
-        prev = self._alerted.get(tid)
-        self._alerted[tid] = e.end
-        if prev is not None and e.start <= prev + EPS:
-            return  # то же событие продолжается
-        self.alerts.append({"t": round(now, 2), "track_id": tid, "start": round(e.start, 2), "end": round(e.end, 2),
-                            "latency": round(now - e.end, 2)})  # fmt: skip
-        log.info("t=%.1f с: похоже на курение, человек %d (%.1f–%.1f с)", now, tid, e.start, e.end)
+        if msg == "withdrawn":
+            self._withdraw(tid, now, st, events[-1].reject_reason)
+            return
+        rec = {"t": round(now, 2), "track_id": tid, "start": round(st[0], 2), "end": round(st[1], 2)}
+        self.alerts.append({**rec, "latency": round(now - st[1], 2)})
+        log.info("t=%.1f с: похоже на курение, человек %d (%.1f–%.1f с)", now, tid, st[0], st[1])
+
+    def _withdraw(self, tid: int, now: float, st: AlertState, reason: str) -> None:
+        self._alerted[tid] = (st[0], st[1], False)
+        rec = {"t": round(now, 2), "track_id": tid, "start": round(st[0], 2), "end": round(st[1], 2)}
+        self.alerts.append({**rec, "withdrawn": True, "reason": reason})
+        log.info("t=%.1f с: тревога снята, человек %d (%.1f–%.1f с): %s", now, tid, st[0], st[1], reason)
 
     def finish(self, t: float) -> None:
         self._finalize(t, final=True)

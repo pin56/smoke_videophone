@@ -1,5 +1,7 @@
 """Потоковый режим (smokedet/realtime.py) без моделей: отбор кадров, кольцевой буфер, трекер 1 Гц,
 фиксация циклов по ходу потока и повтор из кэша, правило эпизода, конфиг режима."""
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -12,6 +14,8 @@ from smokedet.realtime import (
     SparseTracker,
     StreamFrame,
     Ticker,
+    alert_change,
+    dropped_alert,
     interp_box,
     keep_cycle,
     letterbox,
@@ -226,3 +230,55 @@ def test_objects_per_event_uses_best_cycle():
     assert not e.passed and e.reject_reason == "appearance:1.00"
     # по циклам (как в analyze полного конвейера): цикл ниже порога без прямого признака не остаётся
     assert not keep_cycle(with_overrides(cfg, ["realtime.objects_per_event=false"]))(job.cycles[0])
+
+
+def test_many_cycles_without_cigarette():
+    cfg = with_overrides(Config(), ["realtime.objects=true", "appearance.min_score=0.5", "realtime.many_cycles=3",
+                                    "realtime.many_min_score=10"])  # fmt: skip
+    job, _ = stream_job([1.0, 7.0, 13.0])
+    cycles, signals = person_cycles([job]), person_signals([job], cfg, Roi.full())
+    assert len(job.cycles) == 3
+    for c, s in zip(job.cycles, (2.0, 5.0, 9.0)):
+        c.appearance = s
+    (e,) = rt_events(cycles, signals, cfg)
+    assert not e.passed and e.reject_reason == "many_cycles:3:9.00"  # три взгляда CLIP — сигареты нет
+    job.cycles[2].appearance = 11.0
+    assert [e.passed for e in rt_events(cycles, signals, cfg)] == [True]  # хотя бы один уверенный взгляд
+    job.cycles[2].appearance = float("nan")  # CLIP оценил только два цикла
+    assert [e.passed for e in rt_events(cycles, signals, cfg)] == [True]
+    job.cycles[2].appearance = 9.0
+    assert [e.passed for e in rt_events(cycles, signals, with_overrides(cfg, ["realtime.many_cycles=0"]))] == [True]
+    job.cycles[0].direct = True  # прямой признак (предмет у рта) правило не снимает
+    assert [e.passed for e in rt_events(cycles, signals, cfg)] == [True]
+
+
+def test_alert_withdrawn_and_reconfirmed():
+    def ev(start, end, passed):
+        return SimpleNamespace(start=start, end=end, passed=passed)
+
+    st, msg = alert_change([ev(0, 5, True)], None)
+    assert msg == "alert" and st == (0, 5, True)
+    st, msg = alert_change([ev(0, 12, True)], st)
+    assert msg is None and st == (0, 12, True)  # продолжение — без повторного сообщения
+    st, msg = alert_change([ev(0, 30, False)], st)
+    assert msg == "withdrawn" and st == (0, 30, False)  # событие правило больше не выполняет
+    assert alert_change([ev(0, 30, False)], st) == (st, None)
+    st, msg = alert_change([ev(0, 40, True)], st)
+    assert msg == "alert" and st == (0, 40, True)  # подтвердилось снова
+    # снятое событие идёт после прежнего принятого: прежнее заново не сообщается
+    st = (50, 70, False)
+    assert alert_change([ev(0, 40, True), ev(50, 70, False)], st) == (st, None)
+    st, msg = alert_change([ev(0, 40, True), ev(50, 70, False), ev(90, 95, True)], st)
+    assert msg == "alert" and st == (90, 95, True)  # новое событие того же человека
+
+
+def test_dropped_duplicate_alert():
+    def cyc(start, end, valid=True):
+        return SimpleNamespace(start=start, end=end, valid=valid)
+
+    st = (3.0, 7.0, True)
+    assert dropped_alert(st, [])  # у человека не осталось заданий
+    assert dropped_alert(st, [cyc(20, 22), cyc(4, 5, valid=False)])  # циклы вне события или невалидные
+    assert not dropped_alert(st, [cyc(6, 8)])  # событие держится на цикле другого задания
+    assert not dropped_alert((3.0, 7.0, False), [])  # тревога уже снята
+    assert not dropped_alert(None, [])

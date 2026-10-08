@@ -37,7 +37,7 @@ RT_COLUMNS = [
     *[f"{s}_sec" for s in STAGES], *[f"{s}_load" for s in STAGES], "analysis_sec",
     "decoded_frames", "sparse_frames", "dense_frames", "people", "crops_sparse", "crops_dense", "triggers",
     "jobs", "jobs_reopened", "max_parallel", "dropped_triggers", "scored_cycles", "cycles", "valid_cycles", "events",
-    "alerts", "alert_latency_sec",
+    "alerts", "alerts_withdrawn", "alert_latency_sec",
 ]  # fmt: skip
 
 
@@ -103,7 +103,7 @@ def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: P
         "decode_wait_sec": round(tm.get("decode_wait", 0.0), 2), "pose_sec": round(tm.get("pose_sparse", 0.0) + tm.get("pose_dense", 0.0), 2),
         "appearance_sec": round(tm.get("objects", 0.0), 2), "signals_sec": round(tm.get("cycles", 0.0), 2),
     }  # fmt: skip
-    lat = [a["latency"] for a in run.alerts]
+    lat = [a["latency"] for a in run.alerts if not a.get("withdrawn")]
     rt_row = {
         "camera_id": clip.camera_id, "clip_id": clip.clip_id, "duration_sec": round(dur, 2), "wall_sec": round(wall, 2),
         "load": round(wall / dur, 3) if dur else "", "from_cache": int(from_cache), "analysis_sec": round(analysis_sec, 2),
@@ -112,7 +112,8 @@ def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: P
         **{k: st.get(k, 0) for k in ("decoded_frames", "sparse_frames", "dense_frames", "people", "crops_sparse",
                                       "crops_dense", "triggers", "jobs", "jobs_reopened", "max_parallel",
                                       "dropped_triggers", "scored_cycles")},
-        "cycles": n_cycles, "valid_cycles": n_valid, "events": len(records), "alerts": len(run.alerts),
+        "cycles": n_cycles, "valid_cycles": n_valid, "events": len(records), "alerts": len(lat),
+        "alerts_withdrawn": len(run.alerts) - len(lat),
         "alert_latency_sec": round(sum(lat) / len(lat), 2) if lat else "",
     }  # fmt: skip
     logging.info("[%s] %.1f с видео за %.1f с (загрузка %.2f), заданий %d, циклов %d (валидных %d), событий %d",
