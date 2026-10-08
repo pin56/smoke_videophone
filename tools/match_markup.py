@@ -1,5 +1,10 @@
-"""Сопоставление разметки rasmetka.md с видео и предсказаниями прогонов."""
+"""Сопоставление разметки rasmetka.md с видео и предсказаниями прогонов.
+
+Запуск из корня проекта: пишет rasmetka_gt.csv и сверяет его с runs/true_now и runs/false.
+Импорт (tools/eval_markup.py) берёт отсюда только имена файлов (canonical_stem) и разбор времени (sec).
+"""
 import csv, re, sys, collections
+import unicodedata
 
 ALIAS = {"25_11_6_8_35_37": "2025_11_06_08_35_37", "распитие": "распитие", "распитие (2)": "распитие (2)"}
 # имена из разметки, которые на деле части 600-с файлов (время в разметке — внутри файла)
@@ -22,6 +27,15 @@ _FILES = {  # stem -> (папка, clip_id в runs/true_now|false)
 FILES = _FILES
 LOW = {k.lower(): k for k in _FILES}
 
+
+def canonical_stem(name):
+    """Имя видео из разметки или имя файла без расширения -> stem файла (ALIAS, PART, регистр как у файла)."""
+    name = unicodedata.normalize("NFC", name.strip())
+    stem = ALIAS.get(name, name)
+    stem = PART.get(stem, stem)
+    return LOW.get(stem.lower(), stem)
+
+
 def sec(s):
     s = s.strip().replace("–", "-")
     if not s or s == "-":
@@ -34,70 +48,74 @@ def sec(s):
         return int(m[1]) * 60 + int(m[2])
     return float(s) if re.fullmatch(r"\d+(\.\d+)?", s) else None
 
-rows, prev = [], None
-for ln in open("rasmetka.md", encoding="utf-8").read().splitlines()[1:]:
-    p = [x.strip().strip('"') for x in ln.split("\t")]
-    p += [""] * (5 - len(p))
-    if p[0] == "" and p[1] == "":  # пустое имя и метка: смотрим сдвинутые колонки
-        pass
-    name, lab = p[0], p[1]
-    if not name and prev:
-        name = prev  # строки 212–214 без имени: продолжение 1_drink
-        lab = lab or "не курит"
-    if not name:
-        continue
-    # строки 132/140 с кавычками: поля сдвинуты на пустую колонку
-    if lab == "" and p[2] and "курит" in p[2]:
-        pass
-    prev = name
-    vals = [x for x in p[2:] if x != ""]
-    rows.append((name, lab.lower(), p[2:5], ln))
+def main():
+    rows, prev = [], None
+    for ln in open("rasmetka.md", encoding="utf-8").read().splitlines()[1:]:
+        p = [x.strip().strip('"') for x in ln.split("\t")]
+        p += [""] * (5 - len(p))
+        if p[0] == "" and p[1] == "":  # пустое имя и метка: смотрим сдвинутые колонки
+            pass
+        name, lab = p[0], p[1]
+        if not name and prev:
+            name = prev  # строки 212–214 без имени: продолжение 1_drink
+            lab = lab or "не курит"
+        if not name:
+            continue
+        # строки 132/140 с кавычками: поля сдвинуты на пустую колонку
+        if lab == "" and p[2] and "курит" in p[2]:
+            pass
+        prev = name
+        vals = [x for x in p[2:] if x != ""]
+        rows.append((name, lab.lower(), p[2:5], ln))
 
-out = []
-for name, lab, t, ln in rows:
-    stem = PART.get(ALIAS.get(name, name), ALIAS.get(name, name))
-    stem = LOW.get(stem.lower(), stem)
-    if "курит" in lab and "не" not in lab:
-        l = "SMOKE"
-    elif "не курит" in lab:
-        l = "NOSMOKE"
-    elif "игнор" in lab:
-        l = "IGNORE"
-    else:
-        l = "SMOKE" if "курит" in name else "NOSMOKE"
-    out.append(dict(video=stem, label=l, up=sec(t[0]), puff=sec(t[1]), down=sec(t[2]), raw=ln))
+    out = []
+    for name, lab, t, ln in rows:
+        stem = canonical_stem(name)
+        if "курит" in lab and "не" not in lab:
+            l = "SMOKE"
+        elif "не курит" in lab:
+            l = "NOSMOKE"
+        elif "игнор" in lab:
+            l = "IGNORE"
+        else:
+            l = "SMOKE" if "курит" in name else "NOSMOKE"
+        out.append(dict(video=stem, label=l, up=sec(t[0]), puff=sec(t[1]), down=sec(t[2]), raw=ln))
 
-bad = [o for o in out if o["video"] not in FILES]
-with open("rasmetka_gt.csv", "w", encoding="utf-8", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(["video", "folder", "clip_id", "label", "up_sec", "puff_sec", "down_sec"])
-    for o in out:
-        fo, cid = FILES.get(o["video"], ("?", "?"))
-        w.writerow([o["video"], fo, cid, o["label"], o["up"], o["puff"], o["down"]])
-print("строк", len(out), "не сопоставлено", len(bad))
-for o in bad: print("  ?", repr(o["raw"][:70]))
+    bad = [o for o in out if o["video"] not in FILES]
+    with open("rasmetka_gt.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["video", "folder", "clip_id", "label", "up_sec", "puff_sec", "down_sec"])
+        for o in out:
+            fo, cid = FILES.get(o["video"], ("?", "?"))
+            w.writerow([o["video"], fo, cid, o["label"], o["up"], o["puff"], o["down"]])
+    print("строк", len(out), "не сопоставлено", len(bad))
+    for o in bad: print("  ?", repr(o["raw"][:70]))
 
-def preds(path):
-    d = collections.defaultdict(list)
-    for r in csv.DictReader(open(path, encoding="utf-8")):
-        d[r["clip_id"]].append((float(r["start_sec"]), float(r["end_sec"])))
-    return d
-P = {**preds("runs/true_now/predictions.csv"), **preds("runs/false/predictions.csv")}
-dur = {}
-for r in ("true_now", "false"):
-    for x in csv.DictReader(open(f"runs/{r}/processing_log.csv", encoding="utf-8")):
-        dur[x["clip_id"]] = float(x["duration_sec"])
+    def preds(path):
+        d = collections.defaultdict(list)
+        for r in csv.DictReader(open(path, encoding="utf-8")):
+            d[r["clip_id"]].append((float(r["start_sec"]), float(r["end_sec"])))
+        return d
+    P = {**preds("runs/true_now/predictions.csv"), **preds("runs/false/predictions.csv")}
+    dur = {}
+    for r in ("true_now", "false"):
+        for x in csv.DictReader(open(f"runs/{r}/processing_log.csv", encoding="utf-8")):
+            dur[x["clip_id"]] = float(x["duration_sec"])
 
-print("\nклип | SMOKE-отметок | NOSMOKE | IGNORE | событий | отметки SMOKE внутри событий | NOSMOKE внутри событий | время > длины")
-by = collections.defaultdict(list)
-for o in out: by[o["video"]].append(o)
-for v, os_ in by.items():
-    fo, cid = FILES.get(v, ("?", "?"))
-    ev = P.get(cid, [])
-    def inside(o):
-        t = o["puff"] if o["puff"] is not None else o["up"]
-        return t is not None and any(s - 3 <= t <= e + 3 for s, e in ev)
-    sm = [o for o in os_ if o["label"] == "SMOKE" and o["up"] is not None]; ns = [o for o in os_ if o["label"] == "NOSMOKE"]
-    ig = [o for o in os_ if o["label"] == "IGNORE"]
-    over = [o for o in os_ if any(x is not None and x > dur.get(cid, 1e9) for x in (o["up"], o["puff"], o["down"]))]
-    print(f"{fo}/{v} [{cid}] | {len(sm)} | {len(ns)} | {len(ig)} | {len(ev)} | {sum(map(inside, sm))}/{len(sm)} | {sum(map(inside, ns))}/{len(ns)} | {len(over)}")
+    print("\nклип | SMOKE-отметок | NOSMOKE | IGNORE | событий | отметки SMOKE внутри событий | NOSMOKE внутри событий | время > длины")
+    by = collections.defaultdict(list)
+    for o in out: by[o["video"]].append(o)
+    for v, os_ in by.items():
+        fo, cid = FILES.get(v, ("?", "?"))
+        ev = P.get(cid, [])
+        def inside(o):
+            t = o["puff"] if o["puff"] is not None else o["up"]
+            return t is not None and any(s - 3 <= t <= e + 3 for s, e in ev)
+        sm = [o for o in os_ if o["label"] == "SMOKE" and o["up"] is not None]; ns = [o for o in os_ if o["label"] == "NOSMOKE"]
+        ig = [o for o in os_ if o["label"] == "IGNORE"]
+        over = [o for o in os_ if any(x is not None and x > dur.get(cid, 1e9) for x in (o["up"], o["puff"], o["down"]))]
+        print(f"{fo}/{v} [{cid}] | {len(sm)} | {len(ns)} | {len(ig)} | {len(ev)} | {sum(map(inside, sm))}/{len(sm)} | {sum(map(inside, ns))}/{len(ns)} | {len(over)}")
+
+
+if __name__ == "__main__":
+    main()

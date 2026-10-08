@@ -24,6 +24,9 @@ LOG_COLUMNS = [
     "camera_id", "clip_id", "video_path", "start_time", "duration_sec", "fps", "width", "height",
     "processed_frames", "tracking_sec", "analysis_sec", "render_sec", "total_sec", "realtime_factor",
     "events", "device", "from_cache",
+    # части трекинга (в кэше — с исходного прогона) и лёгкой стадии, с; см. TrackSet.timings, Analysis.timings
+    "decode_wait_sec", "pose_sec", "tracker_sec", "refine_sec", "light_sec",
+    "signals_sec", "verifier_sec", "vapor_sec", "appearance_sec",
 ]  # fmt: skip
 
 
@@ -125,7 +128,9 @@ def hardware_info(device: str) -> dict:
     return info
 
 
-def write_manifest(out_dir: Path, cfg: Config, device: str, verifier: Optional[dict], repo: Path) -> dict:
+def write_manifest(
+    out_dir: Path, cfg: Config, device: str, verifier: Optional[dict], repo: Path, appearance: Optional[dict] = None
+) -> dict:
     ep = cfg.episode
     manifest = {
         "team": cfg.report.team,
@@ -150,6 +155,8 @@ def write_manifest(out_dir: Path, cfg: Config, device: str, verifier: Optional[d
             "tracker": {"config": cfg.detector.tracker, "type": "ByteTrack (Ultralytics)"},
             "verifier": None if verifier is None else {**verifier, "sha256": file_sha256(verifier["weights"]),
                                                        "license": "AGPL-3.0 (Ultralytics)"},
+            "appearance": None if appearance is None else {**appearance, "license": "MIT (OpenAI CLIP)",
+                                                           "fine_tuning": "нет, zero-shot по текстовым описаниям"},
         },  # fmt: skip
         "prompts": None if verifier is None else (verifier.get("positive_classes", []) + verifier.get("negative_classes", [])
                                                   + verifier.get("track_negative_classes", [])),

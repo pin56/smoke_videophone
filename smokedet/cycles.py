@@ -56,6 +56,10 @@ class Cycle:
     vapor: bool = False
     vapor_net: float = float("nan")  # чистая дымка, доля зоны; nan — не замерить (идёт, перекрыт)
     vapor_t: float = float("nan")  # момент максимума дымки
+    # заполняет appearance.AppearanceScorer: насколько кадры паузы похожи на курение (CLIP); nan — не оценено
+    appearance: float = float("nan")
+    look: bool = False  # appearance >= appearance.direct_score: у рта, по CLIP, сигарета
+    rescued_from: str = ""  # причина отказа верификатора, которую отменила высокая оценка CLIP
 
     @property
     def hold(self) -> float:
@@ -93,6 +97,9 @@ class Cycle:
             "vapor": self.vapor,
             "vapor_net": None if np.isnan(self.vapor_net) else round(self.vapor_net, 3),
             "vapor_t": None if np.isnan(self.vapor_t) else round(self.vapor_t, 3),
+            "appearance": None if np.isnan(self.appearance) else round(self.appearance, 3),
+            "look": self.look,
+            "rescued_from": self.rescued_from,
         }
 
 

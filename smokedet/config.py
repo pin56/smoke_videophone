@@ -145,6 +145,34 @@ class VaporConfig:
 
 
 @dataclass
+class AppearanceConfig:
+    """Внешний вид цикла по CLIP (appearance.py): отличает курение от питья и касания лица."""
+
+    enabled: bool = True
+    model: str = "ViT-L/14@336px"  # CLIP (OpenAI); файл весов — в weights_dir
+    weights_dir: str = "weights"
+    max_frames: int = 8  # кадров паузы на цикл
+    mouth_scale: float = 0.35  # сторона узкого кропа «рот + кисть», доля роста человека
+    wide_scale: float = 0.7  # сторона широкого кропа (голова, плечи, руки)
+    min_score: float = 5.0  # цикл с меньшей оценкой без прямого признака — не курение
+    direct_score: float = 12.0  # оценка не ниже — у рта сигарета (look): прямой признак при episode.appearance_as_direct
+    # цикл, отброшенный верификатором за один из этих предметов, с оценкой не ниже rescue_score снова валиден:
+    # YOLO-World принимает кисть с сигаретой за бутылку или стакан, а питьё и телефон CLIP отличает уверенно
+    # (леденец и еду — нет, их здесь нет)
+    rescue_score: float = 11.5
+    rescue_objects: List[str] = field(
+        default_factory=lambda: ["bottle", "water bottle", "cup", "mug", "drinking glass", "beverage can", "can",
+                                 "jar", "glass jar", "thermos", "cell phone"]  # fmt: skip
+    )
+    # цикл, отброшенный при поиске циклов только по этим причинам (cycles.py: face_hidden, no_approach, ...),
+    # с оценкой не ниже rescue_score тоже снова валиден: поза на мелких и повёрнутых людях ошибается.
+    # short_hold сюда не входит: на разметке спасённые короткие паузы чаще не курение (6 против 3)
+    rescue_reasons: List[str] = field(
+        default_factory=lambda: ["hand_low", "hand_above_mouth", "face_hidden", "no_approach", "phone_like", "long_hold"]
+    )
+
+
+@dataclass
 class EpisodeConfig:
     window: float = 20.0  # два полных цикла в пределах 20 с
     min_cycles: int = 2
@@ -157,11 +185,13 @@ class EpisodeConfig:
     evidence_weight: float = 0.6  # вклад прямого признака
     evidence_conf_ref: float = 0.4  # уверенность верификатора, считающаяся «полной»
     negative_penalty: float = 0.5
-    event_negative_fraction: float = 0.5  # доля циклов с «чужим» предметом, отклоняющая событие
+    event_negative_fraction: float = 0.6  # доля циклов с «чужим» предметом, отклоняющая событие
     flash_as_direct: bool = True  # вспышка зажигалки — прямой признак (1 цикл + вспышка = эпизод)
     flash_evidence: float = 1.0  # вклад вспышки в confidence, доля от полного прямого признака
     vapor_as_direct: bool = True  # выдох пара — прямой признак (1 цикл + пар = эпизод)
     vapor_evidence: float = 1.0  # вклад пара в confidence, доля от полного прямого признака
+    appearance_as_direct: bool = True  # сигарета по CLIP (look) — прямой признак (1 цикл + look = эпизод)
+    appearance_evidence: float = 1.0  # вклад look в confidence, доля от полного прямого признака
 
 
 @dataclass
@@ -188,6 +218,7 @@ SECTIONS = {
     "verifier": VerifierConfig,
     "flash": FlashConfig,
     "vapor": VaporConfig,
+    "appearance": AppearanceConfig,
     "episode": EpisodeConfig,
     "report": ReportConfig,
 }
@@ -203,6 +234,7 @@ class Config:
     verifier: VerifierConfig = field(default_factory=VerifierConfig)
     flash: FlashConfig = field(default_factory=FlashConfig)
     vapor: VaporConfig = field(default_factory=VaporConfig)
+    appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
 

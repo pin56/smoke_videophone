@@ -12,9 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
+from .appearance import AppearanceScorer
 from .config import Config
 from .cycles import Cycle, detect_cycles
-from .episodes import Event, build_events
+from .episodes import Event, build_events, has_evidence
 from .flash import Flash, attach_flashes, find_flashes
 from .geometry import TrackSignal, build_signal
 from .io_video import frame_stride, probe_video
@@ -44,6 +45,7 @@ class Analysis:
     cycles: Dict[int, List[Cycle]]
     events: List[Event]
     flashes: Dict[int, List[Flash]] = field(default_factory=dict)
+    timings: Dict[str, float] = field(default_factory=dict)  # с по стадиям: signals, verifier, vapor, appearance
 
 
 def project_path(path: str) -> str:
@@ -98,6 +100,7 @@ class Pipeline:
         if cfg.verifier.enabled:
             self._load_verifier(cfg)
         self.vapor = VaporMeter()
+        self.appearance = AppearanceScorer(self.device, project_path(cfg.appearance.weights_dir))
 
     def _load_verifier(self, cfg: Config) -> ObjectVerifier:
         """Модель верификатора грузится один раз; в tune.py сетка может включить его при выключенном в базе."""
@@ -143,6 +146,8 @@ class Pipeline:
     def analyze(self, clip: ClipInput, ts: TrackSet, cfg: Optional[Config] = None) -> Analysis:
         """Лёгкая стадия: всё, что зависит от порогов. Вызывается многократно в tune.py."""
         cfg = cfg or self.cfg
+        tm = dict.fromkeys(("signals", "verifier", "vapor", "appearance"), 0.0)
+        t0 = time.perf_counter()
         roi = Roi.load(clip.roi_path, ts.meta.width, ts.meta.height)
         tracks = stitch_tracks(ts.tracks, cfg.tracking)
         signals = {
@@ -151,9 +156,12 @@ class Pipeline:
             if len(obs) >= 3
         }
         cycles = {tid: detect_cycles(sig, cfg.cycle) for tid, sig in signals.items()}
+        t1 = time.perf_counter()
+        tm["signals"] = t1 - t0
         if cfg.verifier.enabled:
             self._load_verifier(cfg).verify(clip.clip_id, clip.video_path, cycles, signals, cfg.verifier,
                                             ts.meta.synthetic_from)  # fmt: skip
+        tm["verifier"] = time.perf_counter() - t1
         flashes: Dict[int, List[Flash]] = {}
         if cfg.flash.enabled:  # после верификатора: вспышка отмечает только оставшиеся валидными циклы
             for tid, sig in signals.items():
@@ -161,13 +169,20 @@ class Pipeline:
                 if track_flashes:
                     flashes[tid] = track_flashes
                     attach_flashes(cycles[tid], track_flashes, cfg.flash)
+        t2 = time.perf_counter()
         if cfg.vapor.enabled:  # после верификатора: пар замеряется только у оставшихся валидными циклов
             self.vapor.measure(clip.clip_id, clip.video_path, cycles, signals, cfg.vapor, ts.meta.synthetic_from)
+        t3 = time.perf_counter()
+        tm["vapor"] = t3 - t2
+        if cfg.appearance.enabled:  # последней: циклы с прямым признаком (предмет, вспышка, пар) не отбрасывает
+            self.appearance.score(clip.clip_id, clip.video_path, cycles, signals, cfg.appearance,
+                                  lambda c: has_evidence(c, cfg.episode), ts.meta.synthetic_from)  # fmt: skip
+        tm["appearance"] = time.perf_counter() - t3
         events = build_events(cycles, signals, cfg.episode)
-        return Analysis(signals=signals, cycles=cycles, events=events, flashes=flashes)
+        return Analysis(signals=signals, cycles=cycles, events=events, flashes=flashes, timings=tm)
 
     def process(self, clip: ClipInput, out_dir: Path, render: bool = False, use_cache: bool = True):
-        from .export import event_records, write_debug
+        from .export import LOG_COLUMNS, event_records, write_debug
         from .render import render_video
 
         t0 = time.time()
@@ -212,11 +227,14 @@ class Pipeline:
             "device": self.device,
             "from_cache": int(from_cache),
         }
+        stages = {**getattr(ts, "timings", {}), **analysis.timings}  # в старом кэше треков частей трекинга нет
+        log_row.update({f"{k}_sec": round(v, 2) for k, v in stages.items() if f"{k}_sec" in LOG_COLUMNS})
         return records, log_row, analysis
 
     def info(self) -> dict:
-        """Устройство и фактические веса верификатора — для manifest.json."""
-        return {"device": self.device, "verifier": self.verifier.describe() if self.verifier else None}
+        """Устройство, фактические веса верификатора и модель внешнего вида — для manifest.json."""
+        return {"device": self.device, "verifier": self.verifier.describe() if self.verifier else None,
+                "appearance": self.appearance.describe(self.cfg.appearance) if self.cfg.appearance.enabled else None}  # fmt: skip
 
 
 _worker: Optional[Pipeline] = None  # пайплайн процесса-обработчика (process_clips с workers > 1)

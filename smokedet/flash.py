@@ -65,14 +65,52 @@ def _rect_sum(integral: np.ndarray, x1: float, y1: float, x2: float, y2: float) 
     return int(integral[y2, x2] - integral[y1, x2] - integral[y2, x1] + integral[y1, x1])
 
 
+def _torch_device(device: str):
+    """Устройство torch для медианы фона: CUDA трекера или CPU (MPS не умеет kthvalue/sort по uint8)."""
+    import torch
+
+    d = str(device).strip().lower()
+    if d.isdigit():
+        d = f"cuda:{d}"
+    if d.startswith("cuda") and torch.cuda.is_available():
+        return torch.device(d)
+    return torch.device("cpu")
+
+
+def background_median(frames: Sequence[np.ndarray], device: str = "cpu") -> np.ndarray:
+    """Попиксельная медиана кадров в int16 — ровно np.median(stack, axis=0).astype(int16).
+
+    np.median по оси кадров на 2560×1440/2 занимает ~0.2–0.3 с и съедала большую часть замера света;
+    torch (сортировка на GPU, kthvalue на CPU) даёт тот же результат в 4–16 раз быстрее. При чётном числе
+    кадров np.median берёт среднее двух средних, astype(int16) отбрасывает дробь — здесь это floor.
+    """
+    n = len(frames)
+    try:
+        import torch
+
+        dev = _torch_device(device)
+        x = torch.from_numpy(np.stack(frames)).to(dev).reshape(n, -1)
+        if dev.type == "cuda":
+            s = torch.sort(x, dim=0).values
+            lo, hi = s[(n - 1) // 2], s[n // 2]
+        else:
+            lo = torch.kthvalue(x, (n + 1) // 2, dim=0).values
+            hi = lo if n % 2 else torch.kthvalue(x, n // 2 + 1, dim=0).values
+        med = torch.div(lo.to(torch.int16) + hi.to(torch.int16), 2, rounding_mode="floor")
+        return med.reshape(frames[0].shape).cpu().numpy()
+    except (ImportError, RuntimeError):
+        return np.median(np.stack(frames), axis=0).astype(np.int16)
+
+
 class LightMeter:
     """Пересвет у рта/кистей и вокруг человека относительно фона. Вызывается на каждом кадре трекера,
     в том числе без людей: так обновляется фон."""
 
-    def __init__(self) -> None:
+    def __init__(self, device: str = "cpu") -> None:
         self.frames: Deque[np.ndarray] = deque(maxlen=BG_FRAMES)
         self.bg: Optional[np.ndarray] = None
         self.next_push = -np.inf
+        self.device = device
 
     def measure(self, frame: np.ndarray, t: float, boxes: Sequence[np.ndarray], kpts: Sequence[np.ndarray]):
         """Возвращает для каждого человека (пиксели у рта, пиксели в кольце, scale) или None."""
@@ -87,7 +125,7 @@ class LightMeter:
             self.frames.append(small)
             self.next_push = t + BG_PERIOD
             if len(self.frames) >= BG_MIN_FRAMES:
-                self.bg = np.median(np.stack(self.frames), axis=0).astype(np.int16)
+                self.bg = background_median(self.frames, self.device)
         return out
 
     @staticmethod

@@ -8,9 +8,11 @@ from __future__ import annotations
 import logging
 import pickle
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -20,6 +22,7 @@ from .io_video import FrameClock, VideoMeta, iter_sampled_frames
 log = logging.getLogger(__name__)
 
 CACHE_VERSION = 3  # 2: замер света для вспышек (flash.LightMeter); 3: время кадра по pts (io_video.FrameClock)
+LIGHT_QUEUE = 2  # кадров ждут замера света в потоке (см. PoseTracker.run)
 
 
 @dataclass
@@ -41,6 +44,9 @@ class TrackSet:
     wall_time: float = 0.0
     cache_key: str = ""
     extra: Dict[str, str] = field(default_factory=dict)
+    # с по частям трекинга: ожидание кадра (декодирование не успело), поза (пред-, инференс, постобработка),
+    # ByteTrack, уточнение мелких, замер света; в кэшах до их появления поля нет — getattr(ts, "timings", {})
+    timings: Dict[str, float] = field(default_factory=dict)
 
     @property
     def sample_fps(self) -> float:
@@ -167,7 +173,7 @@ class PoseTracker:
         """on_progress(обработано кадров, всего или None) вызывается после каждого кадра (веб-интерфейс)."""
         from .flash import LightMeter  # flash → geometry → tracking: импорт здесь, иначе цикл
 
-        meter = LightMeter()
+        meter = LightMeter(self.device)
         tracks: Dict[int, List[PersonObs]] = {}
         n_processed = 0
         start = time.time()
@@ -182,31 +188,72 @@ class PoseTracker:
             except ImportError:
                 pass
         last_idx = -1
-        for frame_idx, t, frame in iterator:
-            res = self._track_frame(frame, first=n_processed == 0)
-            n_processed += 1
-            last_idx = frame_idx
-            if on_progress is not None:
-                on_progress(n_processed, total)
-            if res.boxes is None or res.boxes.id is None or len(res.boxes) == 0:
-                meter.measure(frame, t, [], [])  # фон обновляется и на кадрах без людей
-                continue
-            boxes = res.boxes.xyxy.cpu().numpy().astype(np.float32)
-            ids = res.boxes.id.int().cpu().numpy()
-            scores = res.boxes.conf.cpu().numpy()
-            if res.keypoints is not None:
-                kpts = res.keypoints.data.cpu().numpy().astype(np.float32).copy()
-            else:
-                kpts = np.zeros((len(boxes), 17, 3), np.float32)
-            if self.refiner is not None:
-                self._refine(frame, boxes, kpts)
-            lights = meter.measure(frame, t, boxes, kpts)
-            for box, tid, score, kp, light in zip(boxes, ids, scores, kpts, lights):
-                tracks.setdefault(int(tid), []).append(PersonObs(frame_idx, t, box, float(score), kp, light))
+        tm =dict.fromkeys(("decode_wait", "pose", "tracker", "refine", "light"), 0.0)
+        iterator = iter(iterator)
+        # Замер света (CPU) идёт в своём потоке, пока GPU считает позу следующего кадра. Поток один:
+        # кадры замеряются по порядку, как раньше (фон зависит от порядка); light дописывается в наблюдения,
+        # когда замер готов. В tm["light"] — время самого замера, а не ожидания.
+        light_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="light")
+        pending: Deque[Tuple[Future, List[PersonObs]]] = deque()
+
+        def measure(frame, t, boxes, kpts):
+            a = time.perf_counter()
+            return meter.measure(frame, t, boxes, kpts), time.perf_counter() - a
+
+        def settle(limit: int) -> None:  # в очереди не больше limit кадров: кадр 2560x1440 — 11 МБ
+            while len(pending) > limit:
+                fut, obs_list = pending.popleft()
+                lights, dt = fut.result()
+                tm["light"] += dt
+                for o, light in zip(obs_list, lights):
+                    o.light = light
+
+        try:
+            while True:
+                t0 = time.perf_counter()
+                item = next(iterator, None)
+                t1 = time.perf_counter()
+                tm["decode_wait"] += t1 - t0
+                if item is None:
+                    break
+                frame_idx, t, frame = item
+                res = self._track_frame(frame, first=n_processed == 0)
+                t2 = time.perf_counter()
+                pose = sum(res.speed.get(k) or 0.0 for k in ("preprocess", "inference", "postprocess")) / 1000.0
+                tm["pose"] += min(pose, t2 - t1)
+                tm["tracker"] += max(0.0, t2 - t1 - pose)  # остаток вызова track(): обновление ByteTrack
+                n_processed += 1
+                last_idx = frame_idx
+                if on_progress is not None:
+                    on_progress(n_processed, total)
+                if res.boxes is None or res.boxes.id is None or len(res.boxes) == 0:
+                    pending.append((light_pool.submit(measure, frame, t, [], []), []))  # фон обновляется и без людей
+                    settle(LIGHT_QUEUE)
+                    continue
+                boxes = res.boxes.xyxy.cpu().numpy().astype(np.float32)
+                ids = res.boxes.id.int().cpu().numpy()
+                scores = res.boxes.conf.cpu().numpy()
+                if res.keypoints is not None:
+                    kpts = res.keypoints.data.cpu().numpy().astype(np.float32).copy()
+                else:
+                    kpts = np.zeros((len(boxes), 17, 3), np.float32)
+                t3 = time.perf_counter()
+                if self.refiner is not None:
+                    self._refine(frame, boxes, kpts)
+                tm["refine"] += time.perf_counter() - t3
+                obs_list = [PersonObs(frame_idx, t, box, float(score), kp) for box, score, kp in zip(boxes, scores, kpts)]
+                for tid, o in zip(ids, obs_list):
+                    tracks.setdefault(int(tid), []).append(o)
+                pending.append((light_pool.submit(measure, frame, t, boxes, kpts), obs_list))
+                settle(LIGHT_QUEUE)
+            settle(0)
+        finally:
+            light_pool.shutdown(wait=True, cancel_futures=True)
         if last_idx >= 0 and last_idx + 1 > meta.frame_count:
             meta.frame_count = last_idx + 1  # поток или неверный FRAME_COUNT в контейнере
         meta.synthetic_from = clock.synthetic_from  # FrameReader не ищет такие кадры по pts
-        return TrackSet(meta=meta, stride=stride, tracks=tracks, processed_frames=n_processed, wall_time=time.time() - start)
+        return TrackSet(meta=meta, stride=stride, tracks=tracks, processed_frames=n_processed, wall_time=time.time() - start,
+                        timings=tm)  # fmt: skip
 
 
 def stitch_tracks(tracks: Dict[int, List[PersonObs]], cfg: TrackingConfig) -> Dict[int, List[PersonObs]]:
