@@ -131,6 +131,11 @@ def prefetched(items: Iterator, size: int) -> Iterator:
         thread.join()
 
 
+def sampled_count(frame_count: int, stride: int) -> int:
+    """Сколько кадров отдаст iter_sampled_frames: индексы 0, stride, 2·stride, … < frame_count (с округлением вверх)."""
+    return -(-frame_count // stride)
+
+
 def iter_sampled_frames(
     path: str, stride: int, fps: float, clock: Optional[FrameClock] = None, prefetch: int = PREFETCH
 ) -> Iterator[Tuple[int, float, np.ndarray]]:

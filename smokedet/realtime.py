@@ -252,7 +252,9 @@ class StoredCrop:
 
 class PersonJob:
     """Плотная проверка области одного человека: отсчёты позы ~dense_fps и фиксация законченных циклов на
-    шагах 1 Гц. Шаги (момент, последний ли) записываются: повтор из кэша проходит их так же, как поток."""
+    шагах 1 Гц. Шаги (момент, последний ли, сколько отсчётов было) записываются: повтор из кэша проходит их
+    так же, как поток. Число отсчётов нужно, потому что после повторного открытия задания бэкфилл из кольцевого
+    буфера дописывает отсчёты с временем раньше прошлого шага: по времени повтор отдал бы их не тому шагу."""
 
     def __init__(self, tid: int, box: np.ndarray, until: float, t0: float = 0.0):
         self.tid = tid
@@ -260,7 +262,7 @@ class PersonJob:
         self.box = np.asarray(box, dtype=np.float64).copy()  # рамка человека для кропа следующего кадра
         self.until = until  # после этого момента без новых срабатываний триггера задание закрывается
         self.obs: List[PersonObs] = []
-        self.ticks: List[Tuple[float, bool]] = []
+        self.ticks: List[Tuple[float, bool, int]] = []
         self.cycles: List[Cycle] = []  # зафиксированные циклы
         self.crops: Dict[int, StoredCrop] = {}  # стадия 4: кадр -> кроп «рот + кисть»
         self.closed = False
@@ -296,7 +298,7 @@ class PersonJob:
         """Новые законченные циклы по отсчётам последних finalize_window с (не раньше конца прошлого цикла).
         Цикл фиксируется, если после его конца прошло settle с (отвод руки и сглаживание уже не изменятся),
         а при закрытии задания (final) — сразу."""
-        self.ticks.append((now, final))
+        self.ticks.append((now, final, len(self.obs)))
         settle = cfg.cycle.lookaround + SETTLE_EXTRA
         start = max(self._cut, now - cfg.realtime.finalize_window)
         obs = [o for o in self.obs if o.t >= start - EPS]
@@ -336,10 +338,15 @@ def replay_job(rec: dict, cfg: Config, roi: Roi) -> PersonJob:
     """Повтор задания из кэша: те же отсчёты и шаги фиксации, что в потоке."""
     job = PersonJob(rec["tid"], rec["obs"][0].box if rec["obs"] else np.zeros(4), 0.0, rec.get("t0", 0.0))
     obs, i = rec["obs"], 0
-    for now, final in rec["ticks"]:
-        while i < len(obs) and obs[i].t <= now + EPS:
-            job.obs.append(obs[i])
-            i += 1
+    for tick in rec["ticks"]:
+        now, final = tick[0], tick[1]
+        if len(tick) > 2:  # отсчёты, которые были у задания на этом шаге
+            job.obs.extend(obs[i : tick[2]])
+            i = max(i, tick[2])
+        else:  # кэш до записи числа отсчётов: по времени
+            while i < len(obs) and obs[i].t <= now + EPS:
+                job.obs.append(obs[i])
+                i += 1
         job.finalize(now, final, cfg, roi)
     job.obs.extend(obs[i:])
     return job

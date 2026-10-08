@@ -5,10 +5,14 @@ import cv2
 import numpy as np
 import pytest
 
+from types import SimpleNamespace
+
+from smokedet import io_video, pipeline
+from smokedet.config import Config
 from smokedet.export import git_commit
-from smokedet import io_video
-from smokedet.io_video import FrameClock, FrameReader
-from smokedet.pipeline import track_cache_key
+from smokedet.io_video import FrameClock, FrameReader, sampled_count
+from smokedet.pipeline import ClipInput, Pipeline, cacheable, track_cache_key
+from smokedet.tracking import TrackSet
 
 
 def _git(repo, *args):
@@ -40,6 +44,26 @@ def test_track_cache_key_depends_on_tracker_yaml(tmp_path):
     assert k1 != track_cache_key(str(video), "cfg", str(tracker))
     # встроенный трекер ultralytics (файла нет в проекте) — в ключ идёт имя
     assert track_cache_key(str(video), "cfg", "bytetrack.yaml") != track_cache_key(str(video), "cfg", "botsort.yaml")
+
+
+def test_stream_tracks_not_cached(tmp_path, monkeypatch):
+    # у потока ключ кэша один и тот же между прогонами: прошлая запись не берётся и новая не пишется
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"0")
+    assert cacheable(str(video)) and not cacheable("rtsp://10.0.0.1/cam1")
+
+    def no_cache(*args):
+        raise AssertionError("кэш потока прочитан")
+
+    monkeypatch.setattr(TrackSet, "load", staticmethod(no_cache))
+    monkeypatch.setattr(pipeline, "probe_video", lambda path, fps: SimpleNamespace(fps=25.0, width=4, height=4, duration=1.0))
+    saved = []
+    fresh = SimpleNamespace(save=saved.append)
+    pipe = object.__new__(Pipeline)  # без загрузки моделей
+    pipe.cfg, pipe.progress, pipe.device = Config(), False, "cpu"
+    pipe._tracker = SimpleNamespace(run=lambda meta, stride, **kw: fresh)
+    clip = ClipInput(video_path="rtsp://10.0.0.1/cam1", camera_id="cam1", clip_id="cam1")
+    assert pipe.track(clip, tmp_path / "cache") is fresh and saved == []
 
 
 def test_frame_clock_uses_pts():
@@ -159,3 +183,12 @@ def test_prefetched_order_errors_and_early_exit():
     assert next(it) == 0
     it.close()  # досрочный выход: поток остановлен, источник закрыт (в нём освобождается VideoCapture)
     assert closed == [1]
+
+
+@pytest.mark.parametrize("n, stride", [(120, 3), (121, 3), (122, 3), (1, 3), (10, 1)])
+def test_sampled_count_matches_iteration(monkeypatch, n, stride):
+    # всего кадров для полосы прогресса трекера — ровно столько, сколько отдаст iter_sampled_frames
+    pts_ms = [i * 40.0 for i in range(n)]
+    monkeypatch.setattr(io_video, "_open", lambda path: VfrCapture(pts_ms))
+    frames = list(io_video.iter_sampled_frames("v.mp4", stride, 25.0, prefetch=0))
+    assert sampled_count(n, stride) == len(frames)

@@ -28,7 +28,7 @@ from typing import Optional
 
 from smokedet.config import Config
 from smokedet.export import LOG_COLUMNS, event_records, write_debug, write_manifest, write_predictions, write_processing_log
-from smokedet.pipeline import LOG_FORMAT, ROOT, ClipInput, read_inputs_csv
+from smokedet.pipeline import LOG_FORMAT, ROOT, ClipInput, cacheable, read_inputs_csv
 from smokedet.realtime import STAGES, RealtimeDetector, analyze, load_rt_config, load_run, rt_cache_key, save_run
 from smokedet.roi import Roi
 
@@ -64,7 +64,7 @@ def parse_args(argv=None):
 def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: Path, cache_dir: Optional[Path]):
     """Клип: стадии 1–3 (или повтор из кэша) → события → строки predictions/processing_log/realtime_log."""
     key = rt_cache_key(clip.video_path, cfg)
-    cache_path = cache_dir / f"{clip.clip_id}_rt.pkl" if cache_dir else None
+    cache_path = cache_dir / f"{clip.clip_id}_rt.pkl" if cache_dir and cacheable(clip.video_path) else None
     run = load_run(cache_path, key) if cache_path else None
     jobs = None
     from_cache = run is not None
