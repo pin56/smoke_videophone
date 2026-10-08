@@ -34,7 +34,8 @@ import cv2
 import numpy as np
 import yaml
 
-from .appearance import AppearanceScorer, apply_score, crop_geometry, cycle_score, plan_frames, rescuable, square_crop
+from .appearance import (AppearanceScorer, apply_score, crop_geometry, cycle_score, plan_frames, rescuable, square_crop,
+                         view_plan)
 from .config import Config, apply_overrides, config_from_dict, load_config
 from .cycles import Cycle, detect_cycles
 from .episodes import Event, build_events, has_evidence
@@ -592,19 +593,20 @@ def score_from_memory(job: PersonJob, cycles: List[Cycle], sig: TrackSignal, cfg
     """Оценка CLIP циклов по кропам из памяти задания: кадры и центры — как в AppearanceScorer (plan_frames,
     crop_geometry), кроп вырезается из сохранённого квадрата вместо кадра."""
     ac = cfg.appearance
-    scales = (ac.mouth_scale, ac.wide_scale)
+    plan = view_plan(ac)
     out = []
     for c in cycles:
         ks = plan_frames(sig, c, ac.max_frames)
         centers, height = crop_geometry(sig, c, ks)
-        views: List[List[np.ndarray]] = [[] for _ in scales]
+        views: List[List[np.ndarray]] = [[] for _ in plan]
         for k, (cx, cy) in zip(ks, centers):
             sc = job.crops.get(int(sig.frame_idx[k]))
             if sc is None:
                 continue
-            for v, s in enumerate(scales):
+            for v, (s, _) in enumerate(plan):
                 views[v].append(square_crop(sc.img, (cx - sc.x0) * sc.k, (cy - sc.y0) * sc.k, s * height * sc.k))
-        out.append(cycle_score([encoder(views[v], v) for v in range(len(scales))]) if views[0] else float("nan"))
+        out.append(cycle_score([encoder(views[v], tv) for v, (_, tv) in enumerate(plan)], ac.frame_agg)
+                   if views[0] else float("nan"))  # fmt: skip
     return out
 
 

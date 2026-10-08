@@ -128,8 +128,18 @@ def export_openvino(model, weights: str) -> str:
     return out
 
 
-def cycle_score(view_scores: Sequence[np.ndarray]) -> float:
-    """Сумма по видам кропа максимума оценки по кадрам."""
+def view_plan(cfg: AppearanceConfig) -> List[Tuple[float, int]]:
+    """Виды кропа: (сторона, доля роста; словарь 0 — узкий, 1 — широкий)."""
+    views = [(cfg.mouth_scale, 0), (cfg.wide_scale, 1)]
+    return views + [(cfg.tight_scale, 0)] if cfg.tight_scale > 0 else views
+
+
+def cycle_score(view_scores: Sequence[np.ndarray], agg: str = "max") -> float:
+    """Сумма по видам кропа оценки по кадрам: максимум (max) или среднее двух лучших (top2)."""
+    if agg == "top2":
+        return float(sum(np.sort(s)[-2:].mean() for s in view_scores))
+    if agg != "max":
+        raise ValueError(f"appearance.frame_agg: {agg}")
     return float(sum(np.max(s) for s in view_scores))
 
 
@@ -245,7 +255,7 @@ class AppearanceScorer:
 
     @staticmethod
     def _key(clip_id: str, c: Cycle, cfg: AppearanceConfig, digest: str) -> tuple:
-        params = (cfg.model, cfg.max_frames, cfg.mouth_scale, cfg.wide_scale)
+        params = (cfg.model, cfg.max_frames, cfg.mouth_scale, cfg.wide_scale, cfg.tight_scale, cfg.frame_agg)
         return clip_id, digest, c.track_id, round(c.start, 3), round(c.hold_start, 3), round(c.hold_end, 3), params
 
     def score(
@@ -285,7 +295,7 @@ class AppearanceScorer:
     ) -> List[float]:
         """Кадры всех циклов читаются за один проход по возрастанию номера (как в vapor.py); кропы цикла
         оцениваются, как только прочитан его последний кадр. nan — ни один кадр не прочитан."""
-        scales = (cfg.mouth_scale, cfg.wide_scale)
+        views = view_plan(cfg)
         plans = []
         need: Dict[int, List[Tuple[int, int]]] = defaultdict(list)  # кадр -> [(номер цикла, номер кропа)]
         times: Dict[int, float] = {}
@@ -298,7 +308,7 @@ class AppearanceScorer:
             for j, (k, f) in enumerate(zip(ks, frames)):
                 need[f].append((i, j))
                 times[f] = float(sig.t[k])
-        crops: List[List[List[np.ndarray]]] = [[[] for _ in scales] for _ in todo]
+        crops: List[List[List[np.ndarray]]] = [[[] for _ in views] for _ in todo]
         results = [float("nan")] * len(todo)
         with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
             for f in sorted(need):
@@ -307,9 +317,10 @@ class AppearanceScorer:
                     centers, height, last = plans[i]
                     if frame is not None:
                         cx, cy = centers[j]
-                        for v, s in enumerate(scales):
+                        for v, (s, _) in enumerate(views):
                             crops[i][v].append(square_crop(frame, cx, cy, s * height))
                     if f == last and crops[i][0]:
-                        results[i] = cycle_score([encoder(crops[i][v], v) for v in range(len(scales))])
-                        crops[i] = [[] for _ in scales]
+                        results[i] = cycle_score([encoder(crops[i][v], tv) for v, (_, tv) in enumerate(views)],
+                                                 cfg.frame_agg)  # fmt: skip
+                        crops[i] = [[] for _ in views]
         return results

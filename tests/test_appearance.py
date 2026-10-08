@@ -4,7 +4,7 @@ import pytest
 from test_logic import make_signal, puffs
 
 from smokedet import appearance
-from smokedet.appearance import PAD_VALUE, AppearanceScorer, cycle_score, plan_frames, square_crop
+from smokedet.appearance import PAD_VALUE, AppearanceScorer, cycle_score, plan_frames, square_crop, view_plan
 from smokedet.config import AppearanceConfig, CycleConfig, EpisodeConfig
 from smokedet.cycles import detect_cycles
 from smokedet.episodes import build_events
@@ -30,6 +30,15 @@ def test_plan_frames_inside_hold():
 
 def test_cycle_score_sums_view_maxima():
     assert cycle_score([np.array([1.0, 3.0]), np.array([-2.0, 0.5])]) == pytest.approx(3.5)
+
+
+def test_cycle_score_top2_and_tight_view():
+    # top2 — среднее двух лучших кадров вида: один случайно высокий кадр не решает
+    assert cycle_score([np.array([1.0, 3.0, 9.0]), np.array([0.5])], "top2") == pytest.approx(6.0 + 0.5)
+    with pytest.raises(ValueError):
+        cycle_score([np.array([1.0])], "median")
+    assert view_plan(AppearanceConfig()) == [(0.35, 0), (0.7, 1)]
+    assert view_plan(AppearanceConfig(tight_scale=0.2)) == [(0.35, 0), (0.7, 1), (0.2, 0)]  # тесный — словарь узкого
 
 
 def _video(path, level, seconds=12.0, fps=30.0):
