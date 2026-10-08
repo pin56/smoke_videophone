@@ -30,6 +30,8 @@ networkx==3.6.1
 numpy==2.4.6
 nvidia-ml-py==13.615.71
 opencv-python==5.0.0.93
+openvino==2026.4.1
+openvino-telemetry==2025.2.0
 packaging==26.3
 pillow==12.3.0
 pluggy==1.6.0

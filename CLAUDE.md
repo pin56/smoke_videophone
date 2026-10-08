@@ -24,6 +24,7 @@
 .venv/bin/python run.py --input videos/1.mp4 --camera-id cam1 --out runs/x --render   # один клип
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final [--workers 2]   # набор (CSV: video_path,camera_id[,clip_id,start_time,roi])
 .venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final [--no-objects]   # потоковый режим
+.venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/cpu --device cpu --set realtime.det_model=weights/yolo11n_openvino_model --set realtime.pose_model=weights/yolo11m-pose_openvino_model   # на CPU через OpenVINO
 .venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5
 .venv/bin/python ui.py --inputs data/demo.csv --out runs/final        # веб-интерфейс повтора на 127.0.0.1:8765
 .venv/bin/python ui.py --videos videos --out runs/ui                  # то же по папке, анализ при открытии клипа
@@ -76,6 +77,10 @@
 Кэш `<out>/cache/<clip>_rt.pkl`: ключ включает секцию `realtime` кроме `RULE_FIELDS` — параметр, не влияющий на отсчёты
 стадий 1–3, добавляйте в `RULE_FIELDS`, иначе он сбросит кэш. Повтор из кэша (`replay_job`) даёт то же, что поток.
 `load` в `realtime_log.csv` — время / длительность (≤ 1 — успевает); два GPU-прогона одновременно его искажают.
+На CPU папка `*_openvino_model` в `realtime.det_model`/`pose_model` включает `ov_yolo.OvYolo` (предобработка в графе,
+NMS в numpy, без `predict()` ultralytics); CLIP внешнего вида на CPU — IR из `prepare_weights` (`appearance.openvino`).
+OpenVINO на CPU с BF16 (Zen 4/5, Xeon) считает в bf16 — события чуть отличаются от torch. Бюджет ядер — `--cpus` и
+`realtime.threads` (в `RULE_FIELDS`), `cpu_cores` в логе — процессорное время / длительность.
 
 ## Неочевидные моменты
 

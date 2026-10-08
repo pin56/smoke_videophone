@@ -108,6 +108,26 @@ def weights_path(model: str, weights_dir: str) -> str:
     return str(Path(weights_dir) / Path(url).name) if url else model
 
 
+def openvino_path(weights: str) -> str:
+    """IR визуальной части CLIP (tools/prepare_weights.py) рядом с файлом весов: weights/<файл>-visual_openvino."""
+    p = Path(weights)
+    return str(p.with_name(p.stem + "-visual_openvino") / "model.xml")
+
+
+def export_openvino(model, weights: str) -> str:
+    """Визуальная часть загруженной clip.load модели -> IR OpenVINO (веса f32, батч любой); путь к model.xml."""
+    import openvino as ov
+    import torch
+
+    out = openvino_path(weights)
+    if not Path(out).exists():
+        visual = model.visual.float().eval()
+        r = visual.input_resolution
+        ov.save_model(ov.convert_model(visual, example_input=torch.zeros(1, 3, r, r), input=[(-1, 3, r, r)]), out,
+                      compress_to_fp16=False)  # fmt: skip
+    return out
+
+
 def cycle_score(view_scores: Sequence[np.ndarray]) -> float:
     """Сумма по видам кропа максимума оценки по кадрам."""
     return float(sum(np.max(s) for s in view_scores))
@@ -138,7 +158,9 @@ def apply_score(c: Cycle, score: float, cfg: AppearanceConfig, keep: Optional[Ca
 
 
 class ClipEncoder:
-    """CLIP (OpenAI) с векторами описаний обоих видов. На CUDA веса в FP16 (так их грузит clip.load)."""
+    """CLIP (OpenAI) с векторами описаний обоих видов. На CUDA веса в FP16 (так их грузит clip.load). На CPU при
+    cfg.openvino визуальная часть — через OpenVINO (IR из tools/prepare_weights.py; на CPU с bf16 OpenVINO считает
+    в bf16): CLIP-L/336 ~100 мс на кроп против ~650 у torch, косинус векторов с torch >= 0.998."""
 
     def __init__(self, cfg: AppearanceConfig, device: str, weights_dir: str):
         import clip
@@ -150,6 +172,15 @@ class ClipEncoder:
         self.weights = weights_path(cfg.model, weights_dir)
         self.model, self.preprocess = clip.load(cfg.model, device=self.device, download_root=weights_dir)
         self.model.eval()
+        self.visual = None
+        ir = openvino_path(self.weights)
+        if self.device == "cpu" and cfg.openvino:
+            if Path(ir).exists():
+                import openvino as ov
+
+                self.visual = ov.Core().compile_model(ir, "CPU", {"PERFORMANCE_HINT": "LATENCY"})
+            else:
+                log.warning("нет %s (tools/prepare_weights.py): CLIP на CPU через torch, в несколько раз медленнее", ir)
         self.npos, self.text = [], []
         with torch.no_grad():
             for pos, neg in (MOUTH_PROMPTS, WIDE_PROMPTS):
@@ -162,7 +193,10 @@ class ClipEncoder:
         torch = self.torch
         x = torch.stack([self.preprocess(self.Image.fromarray(np.ascontiguousarray(c[:, :, ::-1]))) for c in crops])
         with torch.no_grad():
-            e = self.model.encode_image(x.to(self.device)).float()
+            if self.visual is not None:
+                e = torch.from_numpy(self.visual(x.numpy())[0]).float()
+            else:
+                e = self.model.encode_image(x.to(self.device)).float()
             e = e / e.norm(dim=-1, keepdim=True)
             lg = self.scale * e @ self.text[view].T
             n = self.npos[view]

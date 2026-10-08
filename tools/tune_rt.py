@@ -10,7 +10,8 @@
 (realtime.objects, --no-objects — без неё) при повторе перечитывает кадры пауз из видео, оценки CLIP кэшируются в памяти между точками сетки.
 
 Оценка — как tools/eval_markup.py (rasmetka_gt.csv, только время). На каждую точку: TP/FP/FN, F1, сколько
-true-видео с разметкой имеют хотя бы одно совпавшее событие, FP на false-видео, пропущенные true-видео.
+true-видео с разметкой имеют хотя бы одно совпавшее событие, покрытие (затяжки, пересечённые событиями, и доля
+времени эпизодов курения внутри событий), FP на false-видео, пропущенные true-видео.
 """
 from __future__ import annotations
 
@@ -84,13 +85,15 @@ def main(argv=None) -> int:
     det = RealtimeDetector(cfg0) if cfg0.realtime.objects else None
     gt = load_gt(a.gt, MERGE_GAP)
     gt_stems = {s for s, g in gt.items() if g.episodes}
-    print("| точка | TP | FP | FN | F1 | true с TP | FP в false | дублей | пропущены |\n|---|---|---|---|---|---|---|---|---|")
+    print("| точка | TP | FP | FN | F1 | true с TP | затяжек | время | FP в false | дублей | пропущены |\n|---|---|---|---|---|---|---|---|---|---|---|")
     for point in parse_grid(a.grid):
         cfg = load_rt_config(a.config, base + [f"{k}={v}" for k, v in point.items()])
         res, missed, n_true, fp_false = score_point(gt, clips, runs, cfg, det, gt_stems)
         t = res["total"]
         name = " ".join(f"{k.split('.')[-1]}={v}" for k, v in point.items()) or "база"
-        print(f"| {name} | {t['tp']} | {t['fp']} | {t['fn']} | {t['f1']:.3f} | {n_true - len(missed)}/{n_true} | {fp_false} "
+        cover = "—" if t["time_cover"] is None else f"{t['time_cover']:.0%}"
+        print(f"| {name} | {t['tp']} | {t['fp']} | {t['fn']} | {t['f1']:.3f} | {n_true - len(missed)}/{n_true} "
+              f"| {t['marks_hit']}/{t['marks']} | {cover} | {fp_false} "
               f"| {t['dup']} | {', '.join(missed)} |", flush=True)  # fmt: skip
     return 0
 

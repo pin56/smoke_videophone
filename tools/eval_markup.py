@@ -63,6 +63,7 @@ class ClipGT:
     episodes: List[Tuple[float, float, int]] = field(default_factory=list)  # начало, конец, число отметок
     ignores: List[Tuple[float, float, str]] = field(default_factory=list)  # начало, конец, вид
     nosmoke: List[Tuple[float, float]] = field(default_factory=list)
+    marks: List[Tuple[float, float]] = field(default_factory=list)  # отметки SMOKE со временем (затяжки)
 
 
 def mark_interval(up, puff, down) -> Optional[Tuple[float, float]]:
@@ -113,7 +114,8 @@ def load_gt(path: str, gap: float = MERGE_GAP) -> Dict[str, ClipGT]:
             end = nxt[0] if nxt else float("inf")  # до конца клипа
             if end > start:
                 clip.ignores.append((start, end, "continue"))
-        clip.episodes = merge_marks([iv for iv in seq if iv is not None], gap)
+        clip.marks = sorted(iv for iv in seq if iv is not None)
+        clip.episodes = merge_marks(clip.marks, gap)
     return clips
 
 
@@ -178,6 +180,26 @@ def diagnose_fn(dbg: Optional[dict], start: float, end: float, expand: float) ->
     return "; ".join(parts)
 
 
+def union_length(intervals) -> float:
+    total, end = 0.0, -float("inf")
+    for s, e in sorted(intervals):
+        if e > end:
+            total += e - max(s, end)
+            end = e
+    return total
+
+
+def coverage(g: ClipGT, preds: List[dict]) -> Tuple[int, float, float]:
+    """Сколько затяжек клипа пересекает хотя бы одно предсказание, и сколько секунд эпизодов курения лежит внутри
+    предсказаний (из всех секунд эпизодов). Событийная метрика засчитывает эпизод за пересечение в 1 с, даже если
+    человек курит минуту, а предсказание — одна затяжка: покрытие это показывает."""
+    iv = [(float(r["start_sec"]), float(r["end_sec"])) for r in preds]
+    hit = sum(1 for a, b in g.marks if any(min(b, e) > max(a, s) for s, e in iv))
+    eps = [(s, e) for s, e, _ in g.episodes]
+    inside = [(max(s, a), min(e, b)) for s, e in eps for a, b in iv if min(e, b) > max(s, a)]
+    return hit, union_length(inside), union_length(eps)
+
+
 def evaluate_run(gt: Dict[str, ClipGT], run: Dict[str, RunClip], run_dir: str = "",
                  params: EvalParams = EvalParams()) -> dict:  # fmt: skip
     included, excluded = {}, []
@@ -230,6 +252,8 @@ def evaluate_run(gt: Dict[str, ClipGT], run: Dict[str, RunClip], run_dir: str = 
             m["note"] = diagnose_fn(_debug(run_dir, included[stem].clip_id) if run_dir else None, m["gt_start"],
                                     m["gt_end"], params.gt_expand)  # fmt: skip
 
+    cov = {st: coverage(gt[st], rc.preds) for st, rc in included.items() if st in gt and gt[st].marks}
+
     def subset(cond) -> dict:
         tp = sum(1 for m in rep["matches"] if m["result"] == "TP" and cond(m["clip_id"]))
         fp = sum(1 for m in rep["matches"] if m["result"] == "FP" and cond(m["clip_id"]))
@@ -237,7 +261,11 @@ def evaluate_run(gt: Dict[str, ClipGT], run: Dict[str, RunClip], run_dir: str = 
         dup = sum(1 for m in rep["matches"] if m["result"] == "FP" and m["dup"] and cond(m["clip_id"]))
         hours = sum(rc.duration for st, rc in included.items() if cond(st)) / 3600.0
         p, r, f1 = prf(tp, fp, fn)
-        return {"tp": tp, "fp": fp, "fn": fn, "precision": p, "recall": r, "f1": f1, "dup": dup,
+        marks = sum(len(gt[st].marks) for st in cov if cond(st))
+        ep_sec = sum(c[2] for st, c in cov.items() if cond(st))
+        return {"tp": tp, "fp": fp, "fn": fn, "precision": p, "recall": r, "f1": f1, "dup": dup, "marks": marks,
+                "marks_hit": sum(c[0] for st, c in cov.items() if cond(st)),
+                "time_cover": sum(c[1] for st, c in cov.items() if cond(st)) / ep_sec if ep_sec else None,
                 "f1_nodup": prf(tp, fp - dup, fn)[2], "hours": hours, "fp_per_hour": fp / hours if hours else None}  # fmt: skip
 
     total = subset(lambda st: True)
@@ -249,7 +277,9 @@ def evaluate_run(gt: Dict[str, ClipGT], run: Dict[str, RunClip], run_dir: str = 
         per_clip.append({"folder": folder[stem], "video": stem, "clip_id": included[stem].clip_id,
                          "duration_sec": included[stem].duration, "gt_episodes": len(gt[stem].episodes) if stem in gt else 0,
                          "preds": len(included[stem].preds), "TP": cnt["TP"], "FN": cnt["FN"], "FP": cnt["FP"],
-                         "ignored": cnt["IGNORED"]})  # fmt: skip
+                         "ignored": cnt["IGNORED"], "marks": len(gt[stem].marks) if stem in gt else 0,
+                         "marks_hit": cov[stem][0] if stem in cov else 0,
+                         "time_cover": round(cov[stem][1] / cov[stem][2], 3) if stem in cov and cov[stem][2] else ""})  # fmt: skip
     single = [(st, s, e) for st, g in gt.items() if st in included for s, e, n in g.episodes if n == 1]
     return {"overall": rep, "total": total, "per_folder": per_folder, "per_clip": per_clip, "excluded": sorted(excluded),
             "missing": missing, "single_mark_episodes": single}  # fmt: skip
@@ -270,7 +300,9 @@ def summary_md(name: str, res: dict) -> str:
     lines = [f"### {name}", "",
              f"P {_f(o['precision'])}  R {_f(o['recall'])}  F1 {_f(o['f1'])}  —  TP {o['tp']}, FP {o['fp']}, FN {o['fn']}, "
              f"в IGNORE {o['ignored_preds']}; FP/ч вне эпизодов и IGNORE {_f(o['fp_per_hour'], '.2f')}; "
-             f"из FP дублей эпизода {res['total']['dup']} (F1 без них {_f(res['total']['f1_nodup'])})", "",
+             f"из FP дублей эпизода {res['total']['dup']} (F1 без них {_f(res['total']['f1_nodup'])}); "
+             f"затяжек в событиях {res['total']['marks_hit']}/{res['total']['marks']}, "
+             f"время эпизодов в событиях {_f(res['total']['time_cover'], '.0%')}", "",
              "| папка | TP | FP | FN | P | R | F1 | часов | FP/ч |", "|---|---|---|---|---|---|---|---|---|"]  # fmt: skip
     for fo, s in res["per_folder"].items():
         lines.append(f"| {fo} | {s['tp']} | {s['fp']} | {s['fn']} | {_f(s['precision'])} | {_f(s['recall'])} | "
@@ -329,10 +361,11 @@ def main(argv=None) -> int:
         neg = res["per_folder"].get("false", {})
         rows.append(f"| {name} | {_f(o['precision'])} | {_f(o['recall'])} | {_f(o['f1'])} | {o['tp']} | {o['fp']} | {o['fn']} "
                     f"| {res['total']['dup']} | {_f(res['total']['f1_nodup'])} | {neg.get('fp', '—')} "
-                    f"| {_f(neg.get('fp_per_hour'), '.1f')} |")  # fmt: skip
+                    f"| {_f(neg.get('fp_per_hour'), '.1f')} | {res['total']['marks_hit']}/{res['total']['marks']} "
+                    f"| {_f(res['total']['time_cover'], '.0%')} |")  # fmt: skip
         print(summary_md(name, res) + "\n")
-    print("| прогон | P | R | F1 | TP | FP | FN | дублей | F1 без дублей | FP в false | FP/ч в false |\n"
-          "|---|---|---|---|---|---|---|---|---|---|---|")
+    print("| прогон | P | R | F1 | TP | FP | FN | дублей | F1 без дублей | FP в false | FP/ч в false | затяжек | время |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     print("\n".join(rows))
     return 0
 

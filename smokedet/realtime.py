@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
 import pickle
 import time
 from collections import Counter, defaultdict, deque
@@ -39,6 +40,7 @@ from .cycles import Cycle, detect_cycles
 from .episodes import Event, build_events, has_evidence
 from .geometry import TrackSignal, arm_plausible, build_signal, estimate_mouth, nearest_hand, raw_scale
 from .io_video import FrameClock, VideoMeta, _open, prefetched, probe_video
+from .ov_yolo import OvYolo, is_openvino_dir
 from .roi import Roi, anchor_point
 from .tracking import PersonObs, box_iou, half_kwargs, select_device
 
@@ -47,10 +49,11 @@ log = logging.getLogger(__name__)
 CACHE_VERSION = 1
 # поля секции realtime, от которых не зависят отсчёты стадий 1–3 (не входят в ключ кэша, меняются повтором)
 RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", "rule_overrides", "finalize_window",
-               "start_hold")  # fmt: skip
+               "start_hold", "threads")  # fmt: skip
 DUP_IOU = 0.8  # два задания плотной проверки с такими рамками — один человек (рамки позы сошлись на нём)
 EPS = 1e-6
 PREFETCH = 8  # кадров плотной сетки, декодированных заранее (поток чтения работает, пока занят GPU)
+POSE_IOU = 0.7  # NMS позы: iou по умолчанию predict() ultralytics
 POSE_BATCH = 24  # кропов в одном вызове позы (все размеры батча прогреваются при загрузке)
 SETTLE_EXTRA = 1.0  # с сверх cycle.lookaround: после конца цикла столько ждать, прежде чем его зафиксировать
 CROP_SIDE = 1.2  # стадия 4: в памяти хранится квадрат со стороной CROP_SIDE роста вокруг «рот + кисть»...
@@ -389,19 +392,39 @@ class PersonDetector:
     """Стадия 1: лёгкий детектор людей на всём кадре."""
 
     def __init__(self, cfg: Config, device: str):
-        from ultralytics import YOLO
-
         rc = cfg.realtime
         self.rc, self.device = rc, device
-        self.model = YOLO(project_path(rc.det_model))
+        path = project_path(rc.det_model)
+        self.ov = OvYolo(path, rc.threads) if device == "cpu" and is_openvino_dir(path) else None
+        if self.ov is None:
+            from ultralytics import YOLO
+
+            self.model = YOLO(path)
+        else:  # вход как у predict() для динамической модели: вписан в imgsz, поля до кратного 32
+            from ultralytics.data.augment import LetterBox
+
+            self.letterbox = LetterBox((rc.det_imgsz, rc.det_imgsz), auto=True, stride=32)
         self.half = half_kwargs(rc.half, device)
 
     def __call__(self, frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if self.ov is not None:
+            from ultralytics.utils.ops import scale_boxes
+
+            img = self.letterbox(image=frame)
+            boxes, conf, _ = self.ov.detect(img[None], self.rc.det_conf, self.rc.det_iou)[0]
+            return scale_boxes(img.shape[:2], boxes, frame.shape[:2]).astype(np.float64), conf.astype(np.float64)
         r = self.model.predict(frame, imgsz=self.rc.det_imgsz, conf=self.rc.det_conf, iou=self.rc.det_iou, classes=[0],
                                device=self.device, verbose=False, **self.half)[0]  # fmt: skip
         if r.boxes is None or len(r.boxes) == 0:
             return np.zeros((0, 4)), np.zeros(0)
         return r.boxes.xyxy.cpu().numpy().astype(np.float64), r.boxes.conf.cpu().numpy().astype(np.float64)
+
+
+def unpack_pose(res) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Results ultralytics -> (рамки xyxy, уверенность, точки (K, 17, 3)) в numpy."""
+    if res.keypoints is None or res.boxes is None or len(res.boxes) == 0:
+        return np.zeros((0, 4)), np.zeros(0), np.zeros((0, 17, 3))
+    return res.boxes.xyxy.cpu().numpy(), res.boxes.conf.cpu().numpy(), res.keypoints.data.cpu().numpy()
 
 
 def letterbox(img: np.ndarray, size: int) -> Tuple[np.ndarray, float, int, int]:
@@ -425,12 +448,15 @@ class CropPose:
     пропорциям; поэтому все размеры батча 1..POSE_BATCH прогреваются при загрузке."""
 
     def __init__(self, cfg: Config, device: str):
-        from ultralytics import YOLO
-
         rc = cfg.realtime
         self.rc, self.device = rc, device
-        self.model = YOLO(project_path(rc.pose_model))
-        if self.model.task != "pose":
+        path = project_path(rc.pose_model)
+        self.ov = OvYolo(path, rc.threads) if device == "cpu" and is_openvino_dir(path) else None
+        if self.ov is None:
+            from ultralytics import YOLO
+
+            self.model = YOLO(path)
+        if (self.ov or self.model).task != "pose":
             raise ValueError(f"{rc.pose_model}: нужна pose-модель, получена задача '{self.model.task}'")
         self.half = half_kwargs(rc.half, device)
 
@@ -439,7 +465,13 @@ class CropPose:
         for bs in range(1, POSE_BATCH + 1):
             self._predict([blank] * bs)
 
-    def _predict(self, imgs: List[np.ndarray]):
+    def _predict(self, imgs: List[np.ndarray]) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Квадраты pose_imgsz -> на каждый (рамки xyxy, уверенность, точки (K, 17, 3)) в координатах квадрата."""
+        if self.ov is not None:
+            return self.ov.detect(np.stack(imgs), self.rc.pose_conf, POSE_IOU)
+        return [unpack_pose(r) for r in self._predict_ul(imgs)]
+
+    def _predict_ul(self, imgs: List[np.ndarray]):
         return self.model.predict(imgs, imgsz=self.rc.pose_imgsz, conf=self.rc.pose_conf, device=self.device,
                                   verbose=False, **self.half)  # fmt: skip
 
@@ -458,18 +490,18 @@ class CropPose:
             where.append(n)
         for s in range(0, len(imgs), POSE_BATCH):
             results = self._predict(imgs[s : s + POSE_BATCH])
-            for res, (r, ox, oy), n in zip(results, geom[s : s + POSE_BATCH], where[s : s + POSE_BATCH]):
-                if res.keypoints is None or res.boxes is None or len(res.boxes) == 0:
+            for (boxes, conf, kpts), (r, ox, oy), n in zip(results, geom[s : s + POSE_BATCH], where[s : s + POSE_BATCH]):
+                if len(boxes) == 0:
                     continue
-                rb = (res.boxes.xyxy.cpu().numpy().astype(np.float64) - np.array([ox, oy, ox, oy])) / r
+                rb = (boxes.astype(np.float64) - np.array([ox, oy, ox, oy])) / r
                 ious = box_iou(rb, np.asarray(items[n][1], dtype=np.float64))
                 j = int(np.argmax(ious))
                 if ious[j] < self.rc.match_iou:
                     continue
-                k = res.keypoints.data[j].cpu().numpy().astype(np.float32).copy()
+                k = kpts[j].astype(np.float32).copy()
                 k[:, 0] = (k[:, 0] - ox) / r
                 k[:, 1] = (k[:, 1] - oy) / r
-                out[n] = (rb[j], k, float(res.boxes.conf[j]))
+                out[n] = (rb[j], k, float(conf[j]))
         return out
 
 
@@ -630,6 +662,35 @@ def load_run(path: Path, key: str) -> Optional[RtRun]:
 
 
 STAGES = ("decode_wait", "detect", "pose_sparse", "pose_dense", "cycles", "objects")
+
+
+def limit_threads(n: int) -> None:
+    """Ограничить инференс на CPU n потоками: torch, OpenCV и OpenVINO.
+
+    ultralytics компилирует модели OpenVINO на устройстве AUTO со своим конфигом без числа потоков (берёт все ядра),
+    а настройка одного ov.Core на другие не действует, поэтому Core.compile_model подменяется: AUTO → CPU (AUTO
+    не принимает INFERENCE_NUM_THREADS) и подставляется число потоков."""
+    if n <= 0:
+        return
+    # OpenMP torch по умолчанию крутит потоки в ожидании (~200 мс): на n ядрах это отнимает их у OpenVINO и декодера
+    os.environ.setdefault("KMP_BLOCKTIME", "0")
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+    import torch
+
+    torch.set_num_threads(n)
+    cv2.setNumThreads(n)
+    try:
+        import openvino as ov
+    except ImportError:
+        return
+    compile_model = ov.Core.compile_model
+
+    def compile_limited(self, model, device_name=None, config=None, *args, **kwargs):
+        if device_name in (None, "CPU", "AUTO"):
+            device_name, config = "CPU", {"INFERENCE_NUM_THREADS": n, **(config or {})}
+        return compile_model(self, model, device_name, config, *args, **kwargs)
+
+    ov.Core.compile_model = compile_limited
 
 
 class RealtimeSession:
@@ -904,7 +965,7 @@ class RealtimeDetector:
         stream_stats: dict = {}
         # форма входа детектора зависит от разрешения: первый вызов на новой форме долгий — до начала отсчёта
         self.detect(np.zeros((max(meta.height, 32), max(meta.width, 32), 3), dtype=np.uint8))
-        start = time.perf_counter()
+        start, cpu0 = time.perf_counter(), time.process_time()
         it = prefetched(iter_stream(video_path, meta.fps, rc.sparse_fps, rc.dense_fps, stream_stats), PREFETCH)
         last_t = 0.0
         while True:
@@ -918,9 +979,10 @@ class RealtimeDetector:
             if on_frame is not None:
                 on_frame(f)
         ses.finish(last_t)
-        wall = time.perf_counter() - start
+        wall, cpu = time.perf_counter() - start, time.process_time() - cpu0
         meta.synthetic_from = stream_stats.get("synthetic_from")
         stats = dict(ses.stats)
+        stats["cpu_sec"] = round(cpu, 2)  # процессорное время всех потоков: сколько ядер занято в среднем
         stats["decoded_frames"] = stream_stats.get("decoded_frames", 0)
         run = RtRun(meta=meta, jobs=[j.record() for j in ses.jobs], sparse=dict(ses.sparse), stats=stats,
                     timings=dict(ses.tm), wall_time=wall, alerts=ses.alerts)  # fmt: skip

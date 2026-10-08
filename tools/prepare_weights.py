@@ -5,7 +5,9 @@
 
 Запускать один раз с интернетом (до площадки). Скачивает в weights/ pose-модель, open-vocab модель
 верификатора и COCO-модель для отката, затем сохраняет open-vocab модель с заданным словарём
-(weights/<модель>-vocab-<хэш>.pt). С таким файлом прогон не загружает текстовый энкодер CLIP.
+(weights/<модель>-vocab-<хэш>.pt). С таким файлом прогон не загружает текстовый энкодер CLIP. Для CPU сохраняет
+в OpenVINO детектор и позу потокового режима (weights/<модель>_openvino_model) и визуальную часть CLIP внешнего
+вида (при appearance.openvino).
 """
 from __future__ import annotations
 
@@ -36,6 +38,12 @@ def main(argv=None) -> int:
     for path in (cfg.detector.pose_model, cfg.verifier.model, cfg.verifier.fallback_model):
         YOLO(project_path(path))  # скачивает недостающий файл по указанному пути
         print(f"{path}: {file_sha256(project_path(path))}")
+    for path in (cfg.realtime.det_model, cfg.realtime.pose_model):  # потоковый режим на CPU: --set realtime.*_model=<папка>
+        pt = Path(project_path(path))
+        ov_dir = pt.with_name(pt.stem + "_openvino_model")
+        if pt.suffix == ".pt" and not ov_dir.is_dir():
+            YOLO(str(pt)).export(format="openvino", dynamic=True)  # пишет weights/<модель>_openvino_model
+        print(f"{path} для CPU (OpenVINO): {ov_dir}")
     vcfg = dataclasses.replace(
         cfg.verifier, model=project_path(cfg.verifier.model), fallback_model=project_path(cfg.verifier.fallback_model)
     )
@@ -51,11 +59,13 @@ def main(argv=None) -> int:
 
     import clip
 
-    from smokedet.appearance import weights_path
+    from smokedet.appearance import export_openvino, weights_path
 
     wdir = project_path(cfg.appearance.weights_dir)
-    clip.load(cfg.appearance.model, device="cpu", download_root=wdir)  # скачивает недостающий файл
+    model, _ = clip.load(cfg.appearance.model, device="cpu", download_root=wdir)  # скачивает недостающий файл
     print(f"CLIP внешнего вида {cfg.appearance.model}: {file_sha256(weights_path(cfg.appearance.model, wdir))}")
+    if cfg.appearance.openvino:
+        print(f"CLIP для CPU (OpenVINO): {export_openvino(model, weights_path(cfg.appearance.model, wdir))}")
     return 0
 
 

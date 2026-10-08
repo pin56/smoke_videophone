@@ -29,11 +29,12 @@ from typing import Optional
 from smokedet.config import Config
 from smokedet.export import LOG_COLUMNS, event_records, write_debug, write_manifest, write_predictions, write_processing_log
 from smokedet.pipeline import LOG_FORMAT, ROOT, ClipInput, cacheable, read_inputs_csv
-from smokedet.realtime import STAGES, RealtimeDetector, analyze, load_rt_config, load_run, rt_cache_key, save_run
+from smokedet.realtime import (STAGES, RealtimeDetector, analyze, limit_threads, load_rt_config, load_run, rt_cache_key,
+                               save_run)
 from smokedet.roi import Roi
 
 RT_COLUMNS = [
-    "camera_id", "clip_id", "duration_sec", "wall_sec", "load", "from_cache",
+    "camera_id", "clip_id", "duration_sec", "wall_sec", "load", "cpu_sec", "cpu_cores", "from_cache",
     *[f"{s}_sec" for s in STAGES], *[f"{s}_load" for s in STAGES], "analysis_sec",
     "decoded_frames", "sparse_frames", "dense_frames", "people", "crops_sparse", "crops_dense", "triggers",
     "jobs", "jobs_reopened", "max_parallel", "dropped_triggers", "scored_cycles", "cycles", "valid_cycles", "events",
@@ -54,6 +55,7 @@ def parse_args(argv=None):
     p.add_argument("--config", default=str(ROOT / "configs" / "default.yaml"))
     p.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE", help="переопределить параметр")
     p.add_argument("--device", help="cpu | mps | 0 (по умолчанию auto)")
+    p.add_argument("--cpus", help="привязать процесс к логическим CPU, например 0,2 (замер бюджета ядер; потоки — realtime.threads)")
     p.add_argument("--objects", action=argparse.BooleanOptionalAction, default=None,
                    help="стадия 4: CLIP по кропам «рот + кисть» (realtime.objects, по умолчанию — из конфига)")
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш отсчётов стадий 1–3")
@@ -106,7 +108,8 @@ def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: P
     lat = [a["latency"] for a in run.alerts if not a.get("withdrawn")]
     rt_row = {
         "camera_id": clip.camera_id, "clip_id": clip.clip_id, "duration_sec": round(dur, 2), "wall_sec": round(wall, 2),
-        "load": round(wall / dur, 3) if dur else "", "from_cache": int(from_cache), "analysis_sec": round(analysis_sec, 2),
+        "load": round(wall / dur, 3) if dur else "", "cpu_sec": st.get("cpu_sec", ""),
+        "cpu_cores": round(st["cpu_sec"] / dur, 3) if dur and "cpu_sec" in st else "", "from_cache": int(from_cache), "analysis_sec": round(analysis_sec, 2),
         **{f"{s}_sec": round(tm.get(s, 0.0), 2) for s in STAGES},
         **{f"{s}_load": round(tm.get(s, 0.0) / dur, 4) if dur else "" for s in STAGES},
         **{k: st.get(k, 0) for k in ("decoded_frames", "sparse_frames", "dense_frames", "people", "crops_sparse",
@@ -134,6 +137,11 @@ def main(argv=None) -> int:
     overrides = list(args.set) + ([f"detector.device={args.device}"] if args.device else [])
     overrides += [] if args.objects is None else [f"realtime.objects={str(args.objects).lower()}"]
     cfg = load_rt_config(args.config, overrides)
+    if args.cpus:
+        import psutil
+
+        psutil.Process().cpu_affinity([int(c) for c in args.cpus.split(",")])
+    limit_threads(cfg.realtime.threads)
 
     if args.inputs:
         clips = read_inputs_csv(args.inputs)

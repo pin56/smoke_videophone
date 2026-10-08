@@ -151,6 +151,7 @@ class AppearanceConfig:
     enabled: bool = True
     model: str = "ViT-L/14@336px"  # CLIP (OpenAI); файл весов — в weights_dir
     weights_dir: str = "weights"
+    openvino: bool = True  # на CPU визуальная часть через OpenVINO (weights/<файл весов>-visual_openvino, prepare_weights)
     max_frames: int = 8  # кадров паузы на цикл
     mouth_scale: float = 0.35  # сторона узкого кропа «рот + кисть», доля роста человека
     wide_scale: float = 0.7  # сторона широкого кропа (голова, плечи, руки)
@@ -209,6 +210,7 @@ class RealtimeConfig:
     pose_imgsz: int = 320
     pose_conf: float = 0.1
     half: bool = True  # FP16, только на CUDA
+    threads: int = 0  # потоков инференса на CPU (torch, OpenCV, OpenVINO); 0 — по умолчанию библиотек (все ядра)
     crop_pad: float = 0.25  # кроп человека: рамка плюс такая доля её сторон с каждой стороны
     match_iou: float = 0.3  # поза в кропе — этого человека, если IoU её рамки с рамкой человека не ниже
     track_iou: float = 0.1  # трекер 1 Гц: пара «трек — рамка» при IoU не ниже...
