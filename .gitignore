@@ -22,6 +22,7 @@ videos/
 *.265
 *.hevc
 
+photos/
 runs/
 weights/
 *.pt
