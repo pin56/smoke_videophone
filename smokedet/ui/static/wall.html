@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мониторинг камер</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/static/wall.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <b>Мониторинг курения</b>
+    <small>Гатчина, 12 камер</small>
+  </div>
+  <nav class="tabs" aria-label="Разделы">
+    <a href="#monitor" data-page="monitor">Мониторинг</a>
+    <a href="#check" data-page="check">Проверка видео</a>
+    <a href="#journal" data-page="journal">Журнал <span id="tabPending"></span></a>
+  </nav>
+  <div class="clock"><span id="date"></span> <b id="clock">--:--:--</b><span id="conn" class="conn"></span></div>
+</header>
+
+<!-- ================= мониторинг ================= -->
+<section class="page" id="page-monitor">
+  <div class="toolbar">
+    <div class="seg" id="mode" aria-label="Режим">
+      <button data-m="live" class="on">Эфир</button>
+      <button data-m="archive">Архив</button>
+    </div>
+    <div class="seg" id="filter" aria-label="Фильтр камер">
+      <button class="on" data-f="all">Все <span>12</span></button>
+      <button data-f="smoking" class="f-alarm">Похоже на курение <span id="nSmoking">0</span></button>
+      <button data-f="suspect" class="f-warn">Подозрение <span id="nSuspect">0</span></button>
+      <button data-f="normal">Без срабатываний <span id="nNormal">0</span></button>
+      <button data-f="problem" class="f-problem">Проблемы с камерой <span id="nProblem">0</span></button>
+    </div>
+    <label class="check"><input type="checkbox" id="alarmsFirst" checked> Тревоги первыми</label>
+    <div class="seg seg--small" id="cols" aria-label="Колонок в сетке">
+      <span class="seg-label">Колонки</span>
+      <button data-c="2">2</button>
+      <button data-c="3" class="on">3</button>
+      <button data-c="4">4</button>
+    </div>
+  </div>
+
+  <div class="archive-bar hidden" id="archiveBar">
+    <div class="archive-controls">
+      <button class="btn" id="arPlay">Пауза</button>
+      <div class="seg seg--tight" id="arSpeed" aria-label="Скорость">
+        <button data-s="1" class="on">1×</button>
+        <button data-s="4">4×</button>
+        <button data-s="16">16×</button>
+      </div>
+      <label class="field">Период
+        <select id="arPeriod">
+          <option value="300">последние 5 мин</option>
+          <option value="900" selected>последние 15 мин</option>
+          <option value="1800">последние 30 мин</option>
+        </select>
+      </label>
+      <span class="ar-time" id="arTime">—</span>
+      <span class="ar-note" id="arNote"></span>
+      <button class="btn btn--ghost" id="arLive">Вернуться в эфир</button>
+    </div>
+    <div class="ar-timeline" id="arTimeline" tabindex="0" aria-label="Таймлайн архива">
+      <div class="ar-marks" id="arMarks"></div>
+      <div class="ar-cursor" id="arCursor"></div>
+    </div>
+    <div class="ar-scale" id="arScale"></div>
+  </div>
+
+  <main class="layout">
+    <section class="grid" id="grid"></section>
+    <aside class="journal">
+      <div class="journal-head">
+        <h2>Эпизоды камер</h2>
+        <a href="#journal" class="pending" id="newCount"></a>
+      </div>
+      <p class="rule">Срабатывание: ≥ 2 цикла «рука ко рту» за 20 с. Один цикл — подозрение, в журнал не пишется.</p>
+      <ul id="events"></ul>
+    </aside>
+  </main>
+</section>
+
+<!-- ================= проверка видео ================= -->
+<section class="page hidden" id="page-check">
+  <div class="check-layout">
+    <div class="check-left">
+      <label class="drop" id="drop">
+        <input type="file" id="fileInput" accept="video/*,.mkv,.ts,.avi" multiple>
+        <b>Загрузить видео для проверки</b>
+        <span>Перетащите файлы сюда или выберите на диске. Анализ идёт на этом компьютере, без живой трансляции.</span>
+      </label>
+      <p class="banner hidden" id="analyzerNote"></p>
+      <h2 class="h2">Очередь заданий</h2>
+      <ul class="jobs" id="jobs"></ul>
+    </div>
+    <div class="check-right" id="jobDetail">
+      <p class="empty">Выберите задание, чтобы посмотреть запись и найденные эпизоды.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= журнал ================= -->
+<section class="page hidden" id="page-journal">
+  <div class="toolbar">
+    <div class="seg" id="jSource" aria-label="Источник">
+      <button data-v="" class="on">Все источники</button>
+      <button data-v="camera">Камеры</button>
+      <button data-v="file">Загруженные файлы</button>
+    </div>
+    <div class="seg" id="jReview" aria-label="Проверка оператором">
+      <button data-v="" class="on">Любая проверка</button>
+      <button data-v="pending">Не проверено</button>
+      <button data-v="confirmed">Подтверждено</button>
+      <button data-v="rejected">Отклонено</button>
+    </div>
+  </div>
+  <p class="disclaimer">Система автоматически отмечает эпизоды, похожие на курение. Факт курения и личность человека она не
+    устанавливает: решение по эпизоду принимает оператор. Фрагменты записи хранятся <span class="retention-days">7 дней</span>
+    и удаляются автоматически.</p>
+  <div class="table-wrap">
+    <table class="jtable">
+      <thead>
+        <tr>
+          <th>Время</th><th>Источник</th><th>Длительность</th><th>Циклов</th><th>Уверенность</th>
+          <th>Обнаружение</th><th>Проверка оператором</th><th>Фрагмент</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="jRows"></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= окно камеры (эфир) ================= -->
+<dialog id="camModal">
+  <div class="modal-body">
+    <div class="modal-screen"><canvas id="bigCanvas"></canvas><div class="hud" id="bigHud"></div></div>
+    <div class="modal-side">
+      <div class="modal-head">
+        <div><small id="mId"></small><h3 id="mName"></h3><p id="mZone"></p></div>
+        <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+      </div>
+      <dl class="facts" id="mFacts"></dl>
+      <h4>Люди в кадре</h4>
+      <ul id="mTracks" class="tracks"></ul>
+      <p class="hint">Шкала — последние 60 с, отметки — завершённые циклы «рука ко рту».</p>
+      <div class="modal-actions" id="mActions"></div>
+    </div>
+  </div>
+</dialog>
+
+<!-- ================= окно фрагмента ================= -->
+<dialog id="player">
+  <div class="modal-body">
+    <div class="modal-screen-col">
+      <div class="modal-screen" id="pScreen">
+        <canvas id="pCanvas"></canvas>
+        <video id="pVideo" playsinline preload="auto" class="hidden"></video>
+        <div class="hud" id="pHud"></div>
+      </div>
+      <div class="p-controls">
+        <button class="btn" id="pPlay">Пауза</button>
+        <div class="p-timeline" id="pTimeline"><div class="p-range" id="pRange"></div><div class="p-cursor" id="pCursor"></div></div>
+        <span class="p-time" id="pTime">—</span>
+      </div>
+    </div>
+    <div class="modal-side">
+      <div class="modal-head">
+        <div><small id="pKind"></small><h3 id="pTitle"></h3><p id="pSub"></p></div>
+        <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+      </div>
+      <dl class="facts" id="pFacts"></dl>
+      <p class="hint">Система отметила эпизод автоматически. Это не подтверждение факта курения и не установление личности.</p>
+      <div class="review" id="pReview"></div>
+      <div class="modal-actions" id="pActions"></div>
+    </div>
+  </div>
+</dialog>
+
+<script src="/static/scene.js"></script>
+<script src="/static/webm.js"></script>
+<script src="/static/wall.js"></script>
+</body>
+</html>

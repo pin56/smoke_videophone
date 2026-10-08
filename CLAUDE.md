@@ -31,6 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final     # набор клипов (CSV: video_path,camera_id[,clip_id,start_time,roi])
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final --workers 2   # клипы параллельно, по процессу на клип
 .venv/bin/python ui.py --inputs data/demo.csv --out runs/final          # веб-интерфейс повтора анализа на 127.0.0.1:8765
+.venv/bin/python monitor.py --analyzer demo --out runs/monitor         # мониторинг: стена камер, архив, проверка видео, журнал
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report
 .venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv auto|clip|camera|none]
 .venv/bin/python tools/eval_markup.py --run runs/x [--run runs/y]   # оценка прогонов по rasmetka_gt.csv (только время, без IoU)
@@ -63,6 +64,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 с кадром без пересчёта. Сервер — stdlib `ThreadingHTTPServer` только на 127.0.0.1, видео отдаётся с HTTP Range (без него браузер
 не перематывает), не-H.264 перекодируется ffmpeg в `<out>/ui/`. Причины отказа и названия классов верификатора переводятся в
 `payload.CYCLE_REASONS`/`OBJECT_NAMES` — новую причину или класс добавляйте туда.
+
+Мониторинг (`monitor.py`, `smokedet/monitor/`, страница `ui/static/wall.html` + `scene.js`/`webm.js`/`wall.js`) — только
+стандартная библиотека, пайплайн импортируется лениво (`analysis.PipelineAnalyzer`), поэтому сервер работает и без
+torch/cv2. Камеры — симуляция на сервере (`cameras.CameraWall`): шаг 0.1 с даёт эфир (SSE `/api/live`), кольцевой буфер
+архива, эпизоды в журнале и фрагменты (`EpisodeSink.close` пишет кадры позы в `<out>/clips/*.json`). Журнал — sqlite
+(`journal.Journal`): `detection` всегда `auto`, решение оператора — отдельное поле `review`; `purge` удаляет файлы с
+истёкшим `clip_expires_at`/`expires_at`, записи остаются. Состояние камеры (`health_script`) не связано с тревогами:
+при «Нет сигнала»/«Ошибка» кадры не пишутся, при «Анализируется» кадры есть, а выводов нет. Формат кадра —
+`Person.encode` ↔ `Scene.decode` в `scene.js`: меняйте оба. `parse_range` продублирован из `ui/server.py`, потому что
+тот модуль импортирует cv2. Тесты — `tests/test_monitor.py`.
 
 Неочевидные моменты:
 - `configs/default.yaml` обязан совпадать с dataclass-значениями по умолчанию в `smokedet/config.py`; это проверяет `test_config_roundtrip`. При добавлении параметра правьте оба файла. Неизвестные ключи в YAML или `--set` вызывают ошибку. Значения приводятся к типу значения по умолчанию (`config._coerce`): `--set detector.device=0` — строка `"0"`, а не число, одиночная строка для списка классов — список из одного элемента.
