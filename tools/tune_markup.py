@@ -44,6 +44,30 @@ def parse_grid(items: List[str]) -> List[Tuple[str, List[str]]]:
     return axes
 
 
+def _f1(tp: int, fp: int, fn: int) -> float:
+    return 2 * tp / (2 * tp + fp + fn) if tp else 0.0
+
+
+def leave_camera_out(per_clip: List[Dict[str, Tuple[int, int, int]]], camera: Dict[str, str], results: List[dict]) -> str:
+    """Перекрёстная проверка «без камеры»: точка выбирается по остальным камерам и считается на отложенной.
+    Итог — F1 по сумме отложенных счётов; разница с F1 лучшей точки — оптимизм подбора на этих данных."""
+    cams = sorted({camera.get(stem, stem) for pc in per_clip for stem in pc})
+    tp = fp = fn = 0
+    picks = []
+    for cam in cams:
+        def score(i, inside):
+            s = [v for stem, v in per_clip[i].items() if (camera.get(stem, stem) == cam) == inside]
+            return tuple(sum(x[k] for x in s) for k in range(3))
+
+        best = max(range(len(per_clip)), key=lambda i: (_f1(*score(i, False)), -i))
+        t, p, n = score(best, True)
+        tp, fp, fn = tp + t, fp + p, fn + n
+        picks.append(best)
+    common = max(set(picks), key=picks.count)
+    return (f"без камеры ({len(cams)} камер): F1 {_f1(tp, fp, fn):.3f} TP {tp} FP {fp} FN {fn}; "
+            f"чаще всего выбрана точка {common + 1} ({picks.count(common)}/{len(cams)}): {results[common]['params']}")
+
+
 def debug_dict(analysis) -> dict:
     return {
         "events": [e.to_dict() for e in analysis.events],
@@ -82,7 +106,11 @@ def main(argv=None) -> int:
     tracksets = [pipeline.track(c, Path(args.cache)) for c in clips]
     print(f"треки: {len(clips)} клипов за {time.time() - t0:.0f} с", file=sys.stderr)
 
+    camera = {}  # stem видео -> camera_id
+    for c in clips:
+        camera[canonical_stem(Path(c.video_path.replace("\\", "/")).stem)] = c.camera_id
     results = []
+    per_clip: List[Dict[str, Tuple[int, int, int]]] = []  # точка -> stem -> (TP, FP, FN)
     best = None
     for n, pt in enumerate(points, 1):
         cfg = with_overrides(base, overrides(pt))
@@ -102,11 +130,14 @@ def main(argv=None) -> int:
         print(f"[{n}/{len(points)}] F1 {tot['f1']:.3f} P {tot['precision']:.3f} R {tot['recall']:.3f} "
               f"TP {tot['tp']} FP {tot['fp']} FN {tot['fn']} dup {tot['dup']}  ({time.time() - t1:.0f} с)  {label}", flush=True)  # fmt: skip
         results.append({"params": label, **{k: tot[k] for k in ("f1", "precision", "recall", "tp", "fp", "fn", "dup")}})
+        per_clip.append({r["video"]: (r["TP"], r["FP"], r["FN"]) for r in res["per_clip"]})
         if best is None or tot["f1"] > best[0]["total"]["f1"]:
             best = (res, run, debug, label)
 
     res, run, debug, label = best
     print(f"\nлучшая точка: {label} — F1 {res['total']['f1']:.3f}")
+    if len(points) > 1:
+        print(leave_camera_out(per_clip, camera, results))
     if args.diag:
         for m in res["overall"]["matches"]:
             if m["result"] not in ("FN", "FP"):
