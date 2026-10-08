@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Повтор анализа — курение</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="rec"></span>
+    <div><b>Поведение, похожее на курение</b><small>повтор анализа · обработка локальная</small></div>
+  </div>
+  <label class="clipsel">Клип <select id="clip"></select></label>
+  <div class="meta" id="clipMeta"></div>
+  <div class="stats">
+    <div><span id="stPeople">0</span><small>людей в зоне</small></div>
+    <div><span id="stCycles">0</span><small>циклов</small></div>
+    <div class="ev"><span id="stEvents">0</span><small>эпизодов</small></div>
+  </div>
+  <div class="clock" id="clock">—</div>
+</header>
+<main>
+  <section class="left">
+    <div id="stage">
+      <video id="video" muted playsinline preload="auto"></video>
+      <canvas id="overlay"></canvas>
+      <div id="alert" class="hidden"></div>
+      <div id="wait"><div class="msg">Загрузка…</div><div class="bar"><i></i></div></div>
+    </div>
+    <canvas id="timeline" title="Перемотка: щелчок или перетаскивание"></canvas>
+    <div class="controls">
+      <button id="play" class="primary" title="Пробел">▶</button>
+      <button id="prevEv" title="К предыдущему эпизоду (P)">⏮</button>
+      <button id="nextEv" title="К следующему эпизоду (N)">⏭</button>
+      <span id="time" class="time">0:00.0 / 0:00</span>
+      <label>Скорость
+        <select id="speed">
+          <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option>
+          <option value="2">2×</option><option value="4">4×</option>
+        </select>
+      </label>
+      <label class="tog"><input type="checkbox" id="optSkel" checked> скелет</label>
+      <label class="tog"><input type="checkbox" id="optRejects" checked> отклонённые</label>
+      <label class="tog"><input type="checkbox" id="optPause"> пауза на эпизоде</label>
+      <label class="tog" title="Показать весь анализ, а не только известное к текущему моменту"><input type="checkbox" id="optAll"> показать всё</label>
+      <span class="sep"></span>
+      <div class="legend">
+        <span><i style="--c: var(--green)"></i>наблюдение</span>
+        <span><i style="--c: var(--yellow)"></i>рука у рта</span>
+        <span><i style="--c: var(--red)"></i>эпизод</span>
+        <span><i style="--c: var(--gray)"></i>вне зоны</span>
+      </div>
+    </div>
+  </section>
+  <aside>
+    <div class="card rule">
+      <h3>Правило эпизода <span id="ruleWho"></span></h3>
+      <div class="cond" id="condCycles">
+        <i></i><div><b></b><small>рука ко рту → пауза 0.5–5 с → отвод</small></div><span class="val"></span>
+      </div>
+      <div class="or">или</div>
+      <div class="cond" id="condDirect">
+        <i></i><div><b>1 цикл + прямой признак</b><small></small></div><span class="val"></span>
+      </div>
+      <div class="verdict" id="verdict">ожидание…</div>
+    </div>
+    <div class="card people">
+      <h3>Расстояние кисть → рот, последние <span id="winSec">20</span> с</h3>
+      <div id="people"></div>
+    </div>
+    <div class="card feed">
+      <h3>Ход анализа</h3>
+      <ol id="feed"></ol>
+    </div>
+  </aside>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

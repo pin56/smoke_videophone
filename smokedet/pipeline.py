@@ -120,7 +120,7 @@ class Pipeline:
     def _cache_key(self, video_path: str) -> str:
         return track_cache_key(video_path, self.cfg.hash(["detector", "video"]), project_path(self.cfg.detector.tracker))
 
-    def track(self, clip: ClipInput, cache_dir: Optional[Path] = None) -> TrackSet:
+    def track(self, clip: ClipInput, cache_dir: Optional[Path] = None, on_progress=None) -> TrackSet:
         """Самая дорогая стадия; результат кэшируется (ключ — видео + секции detector/video конфига)."""
         key = self._cache_key(clip.video_path)
         cache_path = cache_dir / f"{clip.clip_id}_tracks.pkl" if cache_dir else None
@@ -134,7 +134,7 @@ class Pipeline:
         stride = frame_stride(meta.fps, self.cfg.video.target_fps)
         log.info("[%s] %dx%d, %.2f fps, %.1f с, анализ каждого %d-го кадра, устройство %s",
                  clip.clip_id, meta.width, meta.height, meta.fps, meta.duration, stride, self.device)  # fmt: skip
-        ts = self.tracker.run(meta, stride, progress=self.progress)
+        ts = self.tracker.run(meta, stride, progress=self.progress, on_progress=on_progress)
         ts.cache_key = key
         if cache_path is not None:
             ts.save(cache_path)
