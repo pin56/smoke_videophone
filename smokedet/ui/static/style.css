@@ -270,3 +270,13 @@ aside { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
   #stage { flex: none; height: 56vw; }
   .feed { max-height: 60vh; }
 }
+
+.calc table, .clipstats table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.calc td, .clipstats td { padding: 2px 0; vertical-align: top; }
+.calc td:first-child, .clipstats td:first-child { color: var(--muted, #94a3b8); padding-right: 8px; white-space: nowrap; }
+.calc td:last-child, .clipstats td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.calc td small { color: var(--muted, #94a3b8); margin-left: 4px; }
+.calc tr.ok td:last-child { color: var(--green, #22c55e); }
+.calc tr.bad td:last-child { color: var(--red, #ef4444); }
+.clipstats .why { margin-top: 6px; font-size: 11px; color: var(--muted, #94a3b8); }
+.clipstats .why.ev { color: var(--red, #ef4444); }

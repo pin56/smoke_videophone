@@ -32,7 +32,7 @@ const LEAD = 4; // с: переход к эпизоду — с запасом, �
 const RANK = { off: 0, track: 1, hold: 2, event: 3 };
 const CYCLES = ["цикл", "цикла", "циклов"];
 const EPISODES = ["эпизод", "эпизода", "эпизодов"];
-const STATE = { queued: "в очереди", tracking: "трекинг", analyzing: "анализ…", ready: "готов", error: "ошибка" };
+const STATE = { idle: "не открыт", queued: "в очереди", tracking: "трекинг", analyzing: "анализ…", ready: "готов", error: "ошибка" };
 
 const opt = { skel: true, rejects: true, pause: false, all: false };
 let clips = [];
@@ -230,6 +230,38 @@ function stateAt(tr, s, t) {
   return { kind: tr.valid[s.i] ? "track" : "off" };
 }
 
+// действие руки в момент t по границам цикла (без оценки валидности): подъём → пауза у рта → отвод
+function phaseAt(tr, t) {
+  for (const c of tr.cycles) {
+    if (c.start <= t && t < c.hold_start) return { name: "рука идёт ко рту", cycle: c };
+    if (c.hold_start <= t && t <= c.hold_end) return { name: `пауза у рта ${(t - c.hold_start).toFixed(1)} с`, cycle: c };
+    if (c.hold_end < t && t <= c.end) return { name: "отвод руки", cycle: c };
+  }
+  return null;
+}
+
+const f2 = (v, n = 2) => (v === null || v === undefined ? "—" : v.toFixed(n));
+
+// последний цикл, о котором анализ уже знает к моменту t
+function lastCycle(tr, t) {
+  let best = null;
+  for (const c of tr.cycles) if (known(c.reveal_t, t) && (!best || c.end > best.end)) best = c;
+  return best;
+}
+
+// строки признаков и расчётов цикла для подписи у рамки
+function featureLines(c) {
+  const th = data.thresholds;
+  const out = [];
+  out.push([`пауза ${f2(c.hold_end - c.hold_start, 1)} с · мин. d ${f2(c.min_dist)} · кач. ${f2(c.quality)}`, "#cbd5e1"]);
+  if (c.appearance !== null) out.push([`CLIP ${f2(c.appearance, 1)} (порог ${th.min_appearance})${c.look ? " · сигарета" : ""}`, c.appearance >= th.min_appearance ? C.track : C.off]);
+  const objs = Object.entries(c.objects).sort((a, b) => b[1] - a[1]).slice(0, 2);
+  if (objs.length) out.push([`предметы: ${objs.map(([k, v]) => `${k} ${f2(v)}`).join(", ")}`, "#cbd5e1"]);
+  if (c.vapor_net !== null) out.push([`дымка ${f2(c.vapor_net)}${c.vapor ? " · выдох" : ""}`, c.vapor ? C.vapor : "#cbd5e1"]);
+  if (!c.valid && c.reason_text) out.push([cut(`не цикл: ${c.reason_text}`, 46), C.off]);
+  return out;
+}
+
 function visibleAt(t) {
   const out = [];
   for (const tr of data.tracks) {
@@ -322,8 +354,14 @@ function drawPerson(ctx, X, Y, v, t, maxW, maxH) {
   if (st.kind === "event") label = `КУРЕНИЕ? ${st.ev.confidence.toFixed(2)} · id${tr.id}`;
   else if (st.kind === "hold") label = `id${tr.id} · рука у рта ${(t - st.cycle.hold_start).toFixed(1)} с`;
   const big = st.kind === "event";
-  tag(ctx, label, bx, by - 3, col, big ? "#fff" : "#0a0d12", big ? 14 : 12, true, maxW, maxH);
-  if (st.kind !== "off") badges(ctx, tr, t, bx, by + bh + 4, maxW, maxH);
+  let ty = by - 3;
+  const ph = st.kind !== "off" ? phaseAt(tr, t) : null;
+  if (ph) {
+    const dn = dAt(tr, s);
+    ty -= tag(ctx, `${ph.name}${dn !== null ? ` · d ${dn.toFixed(2)}` : ""}`, bx, ty, "rgba(15, 23, 42, 0.88)", C.hold, 11, true, maxW, maxH) + 2;
+  }
+  tag(ctx, label, bx, ty, col, big ? "#fff" : "#0a0d12", big ? 14 : 12, true, maxW, maxH);
+  if (st.kind !== "off") badges(ctx, tr, t, bx, by + bh + 4, maxW, maxH, tr.id === focusId || st.kind !== "track" ? lastCycle(tr, t) : null);
 }
 
 function drawSkeleton(ctx, X, Y, tr, s, col) {
@@ -371,8 +409,9 @@ function drawHandMouth(ctx, X, Y, tr, s, focus) {
   dot(ctx, mx, my, 3.5, "#fff", "#000");
 }
 
-function badges(ctx, tr, t, x, y, maxW, maxH) {
+function badges(ctx, tr, t, x, y, maxW, maxH, last) {
   const items = [];
+  if (last && t <= last.reveal_t + FRESH * 2 + 2) for (const [text, fg] of featureLines(last)) items.push([text, "rgba(15, 23, 42, 0.88)", fg]);
   for (const c of tr.cycles) {
     if (!(c.reveal_t <= t && t <= c.reveal_t + FRESH)) continue;
     if (c.valid) {
@@ -386,9 +425,9 @@ function badges(ctx, tr, t, x, y, maxW, maxH) {
   for (const c of tr.cycles) {
     if (c.vapor && c.vapor_t !== null && c.vapor_t <= t && t <= c.vapor_t + 1.5) items.push(["выдох", C.vapor]);
   }
-  const shown = items.slice(0, 4);
+  const shown = items.slice(0, 8);
   y = Math.min(y, maxH - shown.length * 21); // у нижнего края кадра — внутрь
-  for (const [text, bg] of shown) y += tag(ctx, text, x, y, bg, "#0a0d12", 11, false, maxW, maxH) + 3;
+  for (const [text, bg, fg] of shown) y += tag(ctx, text, x, y, bg, fg || "#0a0d12", 11, false, maxW, maxH) + 3;
 }
 
 // ---------- шкала времени ----------
@@ -646,6 +685,76 @@ function updateAlert(t) {
 
 // ---------- кадр целиком ----------
 
+function setHTML(el, key, html) {
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.innerHTML = html;
+}
+
+// карточка «Признаки и расчёты»: выбранный (или самый активный) человек в текущий момент
+function updateCalc(t, vis) {
+  let tr = focusId !== null ? data.byTrack.get(focusId) || null : null;
+  if (!tr) {
+    const v = vis.filter((x) => x.st.kind !== "off").sort((a, b) => RANK[b.st.kind] - RANK[a.st.kind])[0];
+    tr = v ? v.tr : null;
+  }
+  const el = $("calc");
+  if (!tr) return setHTML(el, "none", '<div class="empty">нет людей в зоне анализа</div>');
+  const s = sampleAt(tr, t);
+  const th = data.thresholds;
+  const rows = [];
+  const row = (k, v, cls = "") => rows.push(`<tr class="${cls}"><td>${k}</td><td>${v}</td></tr>`);
+  const dn = s ? dAt(tr, s) : null;
+  const ph = phaseAt(tr, t);
+  row("человек", `id${tr.id}`);
+  row("действие", ph ? ph.name : "наблюдение");
+  row("d кисть→рот", dn === null ? "—" : `${dn.toFixed(2)} <small>вход ${th.near_enter} · выход ${th.near_exit}</small>`, dn !== null && dn < th.near_enter ? "ok" : "");
+  const c = lastCycle(tr, t);
+  if (c) {
+    row("последний цикл", `${fmt(c.start)} → ${fmt(c.end)} ${c.valid ? "✓" : "✗"}`, c.valid ? "ok" : "bad");
+    row("пауза у рта", `${f2(c.hold_end - c.hold_start, 1)} с <small>${th.min_hold}–${th.max_hold}</small>`);
+    row("мин. d / качество", `${f2(c.min_dist)} / ${f2(c.quality)}`);
+    row("лицо видно", f2(c.face_visible));
+    row("наклон головы", f2(c.head_tilt));
+    row("CLIP", c.appearance === null ? "—" : `${f2(c.appearance, 1)} <small>порог ${th.min_appearance} · сигарета ${th.direct_appearance}</small>`, c.appearance !== null && c.appearance >= th.min_appearance ? "ok" : "bad");
+    const objs = Object.entries(c.objects).sort((a, b) => b[1] - a[1]);
+    row("предметы у рта", objs.length ? objs.map(([k, v]) => `${k} ${f2(v)}`).join(", ") : "нет");
+    row("«чужие» кадры", f2(c.neg_fraction));
+    row("вспышка / дымка", `${c.flash ? "есть" : "нет"} / ${c.vapor_net === null ? "—" : f2(c.vapor_net)}${c.vapor ? " (выдох)" : ""}`);
+    if (c.rescued_from) row("спасён CLIP", c.rescued_from);
+    if (!c.valid) row("отказ", c.reason_text || c.reason, "bad");
+  } else row("циклов пока", "нет");
+  const r = ruleState(tr, t);
+  row("движений в окне", `${r.moves}/${th.min_cycles}`, r.moves >= th.min_cycles ? "ok" : "");
+  setHTML(el, `${tr.id}|${dn === null ? "" : dn.toFixed(2)}|${ph ? ph.name : ""}|${c ? c.id : ""}|${r.moves}`, `<table>${rows.join("")}</table>`);
+}
+
+// статистика клипа целиком
+function updateClipStats() {
+  const el = $("clipStats");
+  const cs = data.cycles;
+  const ok = cs.filter((c) => c.valid).length;
+  const reasons = {};
+  for (const c of cs) if (!c.valid) reasons[c.reason_text || c.reason] = (reasons[c.reason_text || c.reason] || 0) + 1;
+  const top = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const ev = data.events;
+  const rows = [
+    ["длительность", fmt(data.clip.duration, false)],
+    ["людей отслежено", data.stats.tracks],
+    ["касаний рта", cs.length],
+    ["засчитано циклов", ok],
+    ["отклонено", cs.length - ok],
+    ["эпизодов принято", ev.filter((e) => e.passed).length],
+    ["кандидатов отклонено", ev.filter((e) => !e.passed).length],
+    ["вспышек зажигалки", data.flashes.length],
+  ];
+  let html = "<table>" + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") + "</table>";
+  if (top.length) html += '<div class="why">' + top.map(([k, n]) => `<div>${n}× ${k}</div>`).join("") + "</div>";
+  const best = data.passed.map((e) => `<div>id${e.track_id} · ${fmt(e.start)}–${fmt(e.end)} · ${e.confidence.toFixed(2)}</div>`).join("");
+  if (best) html += `<div class="why ev">${best}</div>`;
+  el.innerHTML = html;
+}
+
 function render(t) {
   if (!data) {
     sizeCanvas(overlay);
@@ -657,6 +766,7 @@ function render(t) {
   drawTimeline(t);
   updatePeople(t, vis);
   updateRule(t, vis);
+  updateCalc(t, vis);
   updateFeed(t);
   updateAlert(t);
   setText($("stPeople"), String(vis.filter((v) => v.st.kind !== "off").length));
@@ -742,7 +852,7 @@ function showWait(c) {
     } else if (c.state === "ready") {
       pct = 100;
       msg = `${c.id}: загрузка…`;
-    } else msg = `${c.id}: в очереди на обработку`;
+    } else msg = `${c.id}: ${c.state === "idle" ? "запускаю анализ…" : "в очереди на обработку"}`;
   }
   setText(w.querySelector(".msg"), msg);
   w.querySelector(".bar i").style.width = `${pct}%`;
@@ -771,6 +881,7 @@ async function loadClip(id) {
   dirty = true;
   const c = clips.find((x) => x.id === id);
   showWait(c);
+  if (c && c.state === "idle") fetch(`/api/clips/${encodeURIComponent(id)}`, { cache: "no-store" }).catch(() => {}); // запрос запускает обработку
   if (!c || c.state !== "ready") return;
   loading = true;
   try {
@@ -783,6 +894,7 @@ async function loadClip(id) {
     $("clipMeta").textContent = `${cl.camera_id} · ${cl.video_name} · ${cl.width}×${cl.height} · ${fmt(cl.duration, false)}` +
       ` · людей ${d.stats.tracks} · циклов ${d.stats.cycles}`;
     $("winSec").textContent = String(d.thresholds.window);
+    updateClipStats();
     $("condCycles").querySelector("b").textContent = `≥ ${d.thresholds.min_cycles} ${plural(d.thresholds.min_cycles)} за ${d.thresholds.window} с`;
     const direct = ["сигарета, вейп, дым"];
     if (d.thresholds.flash_as_direct) direct.push("вспышка зажигалки");

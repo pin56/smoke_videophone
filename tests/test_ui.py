@@ -171,3 +171,22 @@ def test_clip_store_reports_errors(tmp_path):
     store = ClipStore([ClipInput("rtsp://cam", "cam1", "s1")], tmp_path, lambda: object())
     store.run()
     assert store.jobs["s1"].state == "error" and "видеофайл" in store.jobs["s1"].error
+
+
+def test_lazy_store_waits_for_request(tmp_path):
+    store = ClipStore([ClipInput("a.mp4", "cam", "a")], tmp_path, lambda: object(), lazy=True)
+    assert store.jobs["a"].state == "idle"
+    store.request("a")
+    assert store.jobs["a"].state == "queued"
+    store.request("missing")  # неизвестный клип игнорируется
+
+
+def test_scan_videos(tmp_path):
+    import ui as ui_mod
+
+    (tmp_path / "true").mkdir()
+    (tmp_path / "true" / "1.mp4").write_bytes(b"0")
+    (tmp_path / "2.MOV").write_bytes(b"0")
+    (tmp_path / "notes.txt").write_text("x")
+    clips = ui_mod.scan_videos(tmp_path)
+    assert [c.clip_id for c in clips] == ["2", "true__1"]

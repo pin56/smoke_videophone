@@ -46,7 +46,7 @@ CHUNK = 1 << 16
 @dataclass
 class ClipJob:
     clip: object  # pipeline.ClipInput
-    state: str = "queued"  # queued → tracking → analyzing → ready | error
+    state: str = "queued"  # idle (ждёт открытия) → queued → tracking → analyzing → ready | error
     progress: float = 0.0
     error: str = ""
     payload: Optional[bytes] = None
@@ -103,16 +103,48 @@ def browser_video(src: Path, proxy_dir: Path, clip_id: str) -> Path:
 class ClipStore:
     """Очередь клипов: трекинг (с кэшем) → анализ → данные для интерфейса. Работает в одном фоновом потоке."""
 
-    def __init__(self, clips: Iterable, out_dir: Path, pipeline_factory: Callable, use_cache: bool = True):
+    def __init__(self, clips: Iterable, out_dir: Path, pipeline_factory: Callable, use_cache: bool = True,
+                 lazy: bool = False):
+        """lazy — клипы ждут (idle), пока их не откроют в интерфейсе: папка с видео не обрабатывается целиком."""
         self.out_dir = Path(out_dir)
         self.use_cache = use_cache
+        self.lazy = lazy
         self._factory = pipeline_factory
         self.jobs: Dict[str, ClipJob] = {c.clip_id: ClipJob(c) for c in clips}
+        self._wake = threading.Condition()
+        if lazy:
+            for job in self.jobs.values():
+                # кэш треков есть — анализ быстрый, готовим сразу
+                job.state = "queued" if self._cached(job) else "idle"
 
     def start(self) -> threading.Thread:
-        thread = threading.Thread(target=self.run, name="ui-clips", daemon=True)
+        thread = threading.Thread(target=self.run_lazy if self.lazy else self.run, name="ui-clips", daemon=True)
         thread.start()
         return thread
+
+    def request(self, clip_id: str) -> None:
+        """Клип открыли в интерфейсе: поставить в очередь (в lazy-режиме), если ещё не обрабатывался."""
+        job = self.jobs.get(clip_id)
+        if job is not None and job.state == "idle":
+            with self._wake:
+                job.state = "queued"
+                self._wake.notify()
+
+    def run_lazy(self) -> None:
+        pipeline = None
+        while True:
+            with self._wake:
+                job = next((j for j in self.jobs.values() if j.state == "queued"), None)
+                while job is None:
+                    self._wake.wait()
+                    job = next((j for j in self.jobs.values() if j.state == "queued"), None)
+            try:
+                if pipeline is None:
+                    pipeline = self._factory()
+                self.process(pipeline, job)
+            except Exception as e:
+                log.exception("[%s] не удалось подготовить клип", job.clip.clip_id)
+                job.state, job.error = "error", f"{type(e).__name__}: {e}"
 
     def _cached(self, job: ClipJob) -> bool:
         return self.use_cache and (self.out_dir / "cache" / f"{job.clip.clip_id}_tracks.pkl").exists()
@@ -212,6 +244,7 @@ class Handler(BaseHTTPRequestHandler):
                 if job is None:
                     self._error(HTTPStatus.NOT_FOUND, head)
                 elif job.payload is None:
+                    self.server.store.request(job.clip.clip_id)  # открыли — значит, нужен анализ
                     self._json(job.summary(), head, HTTPStatus.CONFLICT)
                 else:
                     self._send(job.payload, "application/json; charset=utf-8", head)

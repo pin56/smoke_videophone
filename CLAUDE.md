@@ -33,6 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final [--no-objects]   # потоковый режим (1 Гц + плотная проверка), load в realtime_log.csv
 .venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5   # перебор порогов режима повтором из кэша
 .venv/bin/python ui.py --inputs data/demo.csv --out runs/final          # веб-интерфейс повтора анализа на 127.0.0.1:8765
+.venv/bin/python ui.py --videos videos --out runs/ui            # то же по папке с видео: клип анализируется, когда его открывают (кэш в runs/ui/cache)
 .venv/bin/python monitor.py --analyzer demo --out runs/monitor         # мониторинг: стена камер, архив, проверка видео, журнал
 .venv/bin/python monitor.py --analyzer realtime --enqueue videos/true videos/false   # проверка имеющихся записей потоковым режимом
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report

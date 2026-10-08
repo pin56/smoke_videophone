@@ -5,6 +5,7 @@
 сразу), страница открывается в браузере. Сервер слушает только 127.0.0.1: видео не покидает машину.
 
 Примеры:
+    python ui.py --videos videos
     python ui.py --input videos/true/1.mp4 --camera-id cam1 --out runs/demo
     python ui.py --inputs data/demo.csv --out runs/check_true --port 8765
 """
@@ -24,6 +25,7 @@ from smokedet.ui.server import ClipStore, UiServer
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Веб-интерфейс повтора анализа")
     src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--videos", help="папка с видео (рекурсивно): клип анализируется, когда его открывают")
     src.add_argument("--input", help="видеофайл")
     src.add_argument("--inputs", help="CSV со списком клипов: video_path,camera_id[,clip_id,start_time,roi]")
     p.add_argument("--camera-id", default="cam", help="camera_id для --input")
@@ -40,12 +42,29 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+VIDEO_EXT = {".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm"}
+
+
+def scan_videos(root: Path, camera_id: str = "cam") -> list:
+    """Все видео папки (с вложенными): clip_id — путь относительно папки без расширения, камера — по умолчанию."""
+    clips = []
+    for f in sorted(root.rglob("*")):
+        if f.is_file() and f.suffix.lower() in VIDEO_EXT:
+            cid = f.relative_to(root).with_suffix("").as_posix().replace("/", "__")
+            clips.append(ClipInput(video_path=str(f), camera_id=camera_id, clip_id=cid))
+    return clips
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     overrides = list(args.set) + ([f"detector.device={args.device}"] if args.device else [])
     cfg = load_config(args.config, overrides)
-    if args.inputs:
+    if args.videos:
+        clips = scan_videos(Path(args.videos), args.camera_id)
+        if not clips:
+            sys.exit(f"В {args.videos} нет видео ({', '.join(sorted(VIDEO_EXT))})")
+    elif args.inputs:
         clips = read_inputs_csv(args.inputs)
     else:
         clips = [
@@ -62,7 +81,8 @@ def main(argv=None) -> int:
         sys.exit("clip_id должны быть уникальны")
 
     out_dir = Path(args.out)
-    store = ClipStore(clips, out_dir, lambda: Pipeline(cfg, progress=False), use_cache=not args.no_cache)
+    store = ClipStore(clips, out_dir, lambda: Pipeline(cfg, progress=False), use_cache=not args.no_cache,
+                      lazy=bool(args.videos))
     try:
         server = UiServer(("127.0.0.1", args.port), store)
     except OSError as e:
