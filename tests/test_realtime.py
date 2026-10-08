@@ -140,6 +140,48 @@ def test_replay_matches_stream():
     assert len(rep.obs) == len(job.obs)
 
 
+def test_replay_matches_stream_after_backfill(monkeypatch):
+    # задание закрыто на шаге 6 с, пока поза не находилась (4–6 с); после повторного открытия бэкфилл из
+    # кольцевого буфера дописывает отсчёты 4–6 с: повтор должен отдать их тому же шагу, что и поток, а не шагу 6 с
+    cfg, roi, fps = Config(), Roi.full(), 5.0
+    seen = []
+    finalize = PersonJob.finalize
+
+    def spy(self, now, final, cfg, roi):
+        seen.append((now, final, len(self.obs)))
+        return finalize(self, now, final, cfg, roi)
+
+    monkeypatch.setattr(PersonJob, "finalize", spy)
+
+    def obs(i):
+        t = i / fps
+        return PersonObs(i * 6, t, BOX.copy(), 0.9, pose(puff_alpha(t, [3.0, 10.0])))
+
+    job = PersonJob(1, BOX, 20.0)
+    for i in range(30):  # до 6 с, без отсчётов 4–6 с
+        if i < 20:
+            job.add(obs(i))
+        if i % 5 == 0:
+            job.finalize(i / fps, False, cfg, roi)
+    job.finalize(6.0, True, cfg, roi)
+    for i in range(20, 30):  # бэкфилл после повторного открытия
+        job.add(obs(i))
+    for i in range(30, 100):
+        job.add(obs(i))
+        if i % 5 == 0:
+            job.finalize(i / fps, False, cfg, roi)
+    job.finalize(20.0, True, cfg, roi)
+    stream, seen[:] = list(seen), []
+    rep = replay_job(job.record(), cfg, roi)
+    assert seen == stream
+    assert [(c.start, c.hold_start, c.end) for c in rep.cycles] == [(c.start, c.hold_start, c.end) for c in job.cycles]
+    # кэш до записи числа отсчётов в шагах повторяется по времени, как раньше: шаг 6 с видит бэкфилл
+    old = {**job.record(), "ticks": [(now, final) for now, final, _ in job.ticks]}
+    seen[:] = []
+    assert len(replay_job(old, cfg, roi).obs) == len(job.obs)
+    assert seen != stream
+
+
 def test_episode_rule_two_cycles_or_override():
     cfg = Config()
     job, _ = stream_job([3.0, 10.0])

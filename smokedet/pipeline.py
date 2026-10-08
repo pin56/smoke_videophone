@@ -66,6 +66,12 @@ def track_cache_key(video_path: str, cfg_hash: str, tracker_yaml: str) -> str:
     return hashlib.sha256(f"{p.resolve() if p.exists() else video_path}|{stat}|{cfg_hash}|{tracker}".encode()).hexdigest()[:16]
 
 
+def cacheable(video_path: str) -> bool:
+    """Кэшировать можно только файл: у потока (RTSP/HTTP) ключ кэша не меняется между прогонами,
+    и повторный прогон с той же папкой молча взял бы прошлую запись вместо нового эфира."""
+    return Path(video_path).is_file()
+
+
 def read_inputs_csv(path: str) -> List[ClipInput]:
     """CSV: video_path,camera_id[,clip_id,start_time,roi]. Пути — относительно файла списка."""
     base = Path(path).resolve().parent
@@ -126,7 +132,7 @@ class Pipeline:
     def track(self, clip: ClipInput, cache_dir: Optional[Path] = None, on_progress=None) -> TrackSet:
         """Самая дорогая стадия; результат кэшируется (ключ — видео + секции detector/video конфига)."""
         key = self._cache_key(clip.video_path)
-        cache_path = cache_dir / f"{clip.clip_id}_tracks.pkl" if cache_dir else None
+        cache_path = cache_dir / f"{clip.clip_id}_tracks.pkl" if cache_dir and cacheable(clip.video_path) else None
         if cache_path is not None:
             cached = TrackSet.load(cache_path, key)
             if cached is not None:

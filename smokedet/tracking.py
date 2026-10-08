@@ -17,7 +17,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 import numpy as np
 
 from .config import DetectorConfig, TrackingConfig
-from .io_video import FrameClock, VideoMeta, iter_sampled_frames
+from .io_video import FrameClock, VideoMeta, iter_sampled_frames, sampled_count
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ class PoseTracker:
         tracks: Dict[int, List[PersonObs]] = {}
         n_processed = 0
         start = time.time()
-        total = meta.frame_count // stride if meta.frame_count else None
+        total = sampled_count(meta.frame_count, stride) if meta.frame_count else None
         clock = FrameClock(meta.fps)
         iterator = iter_sampled_frames(meta.path, stride, meta.fps, clock)
         if progress:
@@ -198,7 +198,7 @@ class PoseTracker:
             except ImportError:
                 pass
         last_idx = -1
-        tm =dict.fromkeys(("decode_wait", "pose", "tracker", "refine", "light"), 0.0)
+        tm = dict.fromkeys(("decode_wait", "pose", "tracker", "refine", "light"), 0.0)
         iterator = iter(iterator)
         # Замер света (CPU) идёт в своём потоке, пока GPU считает позу следующего кадра. Поток один:
         # кадры замеряются по порядку, как раньше (фон зависит от порядка); light дописывается в наблюдения,
