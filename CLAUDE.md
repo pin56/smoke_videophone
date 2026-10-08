@@ -1,117 +1,95 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Контекст
 
 Кейс хакатона НТУ «Сириус» × Видеофор (8–10 октября 2026): найти эпизоды поведения, похожего на курение, в видео
-стационарных CCTV-камер (Гатчина). Требования кейса — в `TZ.md` (конспект `Сириус_Хакатон_Видеофор.pdf`, самого PDF
-в репозитории нет), план и обоснование решений — в `PLAN.md`, инструкции запуска — в `README.md`. Ручная разметка
-пользователя — `rasmetka.md`, из неё `tools/match_markup.py` строит `rasmetka_gt.csv` (только время, без рамок).
-Документация, комментарии и логи в коде — на русском.
+стационарных CCTV-камер (Гатчина). Требования кейса — `TZ.md`, план и обоснование решений — `PLAN.md`, запуск —
+`README.md`. Ручная разметка пользователя — `rasmetka.md`, из неё `tools/match_markup.py` строит `rasmetka_gt.csv`
+(только время, без рамок). Документация, комментарии и логи в коде — на русском.
 
 Правила кейса, которые влияют на код:
 - Главная метрика — Event F1. Предсказание засчитывается, если интервал совпадает с эталоном (эталон расширен на ±3 с, пересечение ≥ 1 с) **и** IoU рамки человека в `peak_sec` ≥ 0.3. Поэтому пайплайн работает по отдельным людям, а не по клипу целиком.
 - Положительный эпизод: ≥ 2 полных цикла «рука ко рту → пауза 0.5–5 с → отвод» за 20 с ИЛИ 1 цикл + прямой признак (сигарета/вейп/дым). Циклы одного человека объединяются при паузе ≤ 15 с; события разных людей не объединяются.
 - Пороги подбираются только на эталонном наборе. До фиксации `manifest.json` и предсказаний скрытый набор нельзя использовать для подстройки.
-- Видео объекта нельзя публиковать и отправлять в облачные сервисы: вся обработка локальная. Видео лежат в `videos/` и `data/` и исключены через `.gitignore` — **не коммитить их**.
 
 ## Команды
 
-Окружение: `.venv` (Python 3.11, создано через uv). В uv-venv нет pip, поэтому автоустановка зависимостей
-в ultralytics не работает: новые пакеты ставить так: `uv pip install --python .venv/bin/python <pkg>`.
-На Windows интерпретатор — `.venv/Scripts/python.exe` (в командах ниже `.venv/bin/python` — путь macOS/Linux).
-Версии закреплены в `requirements.txt`, полный снимок проверенного окружения — `requirements.lock`; при
-обновлении пакетов пересоздавайте его через `uv pip freeze --color never`.
+Окружение: `.venv` (Python 3.11, uv). Pip в venv нет, автоустановка ultralytics не работает: пакеты ставить
+`uv pip install --python .venv/bin/python <pkg>`. На Windows интерпретатор — `.venv/Scripts/python.exe`.
+Версии — `requirements.txt`, снимок окружения — `requirements.lock` (пересоздавать `uv pip freeze --color never`).
 
 ```bash
 .venv/bin/python -m pytest -q tests                                   # все тесты (без моделей, ~8 с)
 .venv/bin/python -m pytest -q tests/test_logic.py::test_merge_gap     # один тест
 .venv/bin/python run.py --input videos/1.mp4 --camera-id cam1 --out runs/x --render   # один клип
-.venv/bin/python run.py --inputs data/hidden.csv --out runs/final     # набор клипов (CSV: video_path,camera_id[,clip_id,start_time,roi])
-.venv/bin/python run.py --inputs data/hidden.csv --out runs/final --workers 2   # клипы параллельно, по процессу на клип
-.venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final [--no-objects]   # потоковый режим (1 Гц + плотная проверка), load в realtime_log.csv
-.venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5   # перебор порогов режима повтором из кэша
-.venv/bin/python ui.py --inputs data/demo.csv --out runs/final          # веб-интерфейс повтора анализа на 127.0.0.1:8765
-.venv/bin/python ui.py --videos videos --out runs/ui            # то же по папке с видео: клип анализируется, когда его открывают (кэш в runs/ui/cache)
-.venv/bin/python monitor.py --analyzer demo --out runs/monitor         # мониторинг: стена камер, архив, проверка видео, журнал
-.venv/bin/python monitor.py --analyzer realtime --enqueue videos/true videos/false   # проверка имеющихся записей потоковым режимом
+.venv/bin/python run.py --inputs data/hidden.csv --out runs/final [--workers 2]   # набор (CSV: video_path,camera_id[,clip_id,start_time,roi])
+.venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final [--no-objects]   # потоковый режим
+.venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5
+.venv/bin/python ui.py --inputs data/demo.csv --out runs/final        # веб-интерфейс повтора на 127.0.0.1:8765
+.venv/bin/python ui.py --videos videos --out runs/ui                  # то же по папке, анализ при открытии клипа
+.venv/bin/python monitor.py --analyzer demo --out runs/monitor        # мониторинг: стена камер, архив, журнал
+.venv/bin/python monitor.py --analyzer realtime --enqueue videos/true videos/false
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report
 .venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv auto|clip|camera|none]
-.venv/bin/python tools/eval_markup.py --run runs/x [--run runs/y]   # оценка прогонов по rasmetka_gt.csv (только время, без IoU)
-.venv/bin/python tools/tune_markup.py --inputs runs/goal/all.csv --cache runs/goal/cache --grid appearance.min_score=4,6 --diag   # подбор по разметке пользователя (rasmetka_gt.csv), с проверкой «без камеры»
-.venv/bin/python tools/cvat_export.py --inputs ref.csv --cache runs/x/cache --out runs/cvat   # rasmetka_gt.csv + кэш треков -> XML CVAT
-.venv/bin/python tools/cvat_import.py runs/cvat_done --inputs ref.csv --cache runs/x/cache --out gt.csv   # выгрузки CVAT -> эталон
-.venv/bin/python tools/export_cycles.py --inputs ref.csv --out data/labeling/set1   # кадры циклов для ручной разметки
-.venv/bin/python tools/label_server.py --data data/labeling/set1   # веб-разметчик циклов (метки -> labels.jsonl; обучение — tools/train_cycle_clf.py)
-.venv/bin/python tools/draw_roi.py --video data/clip.mp4 --out data/roi_cam1.json   # маска ROI мышкой
-.venv/bin/python tools/render_markup.py --cvat runs/cvat --out runs/markup   # ролики с разметкой (рамки эпизодов + отметки)
+.venv/bin/python tools/eval_markup.py --run runs/x [--run runs/y]   # оценка по rasmetka_gt.csv (только время, без IoU)
+.venv/bin/python tools/tune_markup.py --inputs runs/goal/all.csv --cache runs/goal/cache --grid appearance.min_score=4,6 --diag
+.venv/bin/python tools/cvat_export.py --inputs ref.csv --cache runs/x/cache --out runs/cvat
+.venv/bin/python tools/cvat_import.py runs/cvat_done --inputs ref.csv --cache runs/x/cache --out gt.csv
+.venv/bin/python tools/export_cycles.py --inputs ref.csv --out data/labeling/set1   # кадры циклов для разметки
+.venv/bin/python tools/label_server.py --data data/labeling/set1   # веб-разметчик циклов (обучение — tools/train_cycle_clf.py)
+.venv/bin/python tools/draw_roi.py --video data/clip.mp4 --out data/roi_cam1.json
+.venv/bin/python tools/render_markup.py --cvat runs/cvat --out runs/markup
 ```
 
-Любой параметр переопределяется через `--set section.key=value`. Линтера и сборки в проекте нет.
+Любой параметр переопределяется через `--set section.key=value`. Линтера и сборки нет.
 
 ## Архитектура
 
 Пайплайн разделён на две стадии, чтобы перебор порогов не требовал повторной детекции:
 
-1. **`Pipeline.track()`** — тяжёлая стадия (`smokedet/tracking.py`). YOLO-pose + ByteTrack на каждом `stride`-м кадре (~10 кадр/с), для мелких людей поза уточняется на кропе. Кадры декодируются заранее в фоновом потоке (`io_video.prefetched`), пока GPU занят предыдущим. На том же кадре `flash.LightMeter` меряет новый пересвет (нет в фоне — скользящей медиане кадров) у рта/кисти и в кольце вокруг человека; замер идёт в отдельном потоке параллельно с позой следующего кадра, медиана фона считается на torch (`flash.background_median`, бит в бит как `np.median`). Результат — `TrackSet` с сырыми наблюдениями (bbox + 17 точек COCO + `light`). Он не зависит от ROI и порогов, поэтому кэшируется в `<out>/cache/<clip_id>_tracks.pkl`. Ключ кэша (`pipeline.track_cache_key`) — видео (размер и mtime) + хэш секций `detector` и `video` конфига + хэш содержимого YAML трекера. Время наблюдения — pts кадра из контейнера (`io_video.FrameClock`, в CCTV-файлах с переменным fps `idx/fps` уходит до 0.7 с); если pts негоден, до конца клипа берётся `idx/fps` со сдвигом, без скачка. `render.py` считает время так же.
-2. **`Pipeline.analyze(clip, trackset, cfg)`** — лёгкая стадия, зависит только от порогов. `tune.py` вызывает её много раз с разными `Config` (логика подбора — `smokedet/tuning.py`: точка сетки выбирается по F1, сглаженному по соседям на сетке, а не по одиночному пику; перекрёстная проверка «оставить клип/камеру» оценивает переобучение и не требует повторного анализа). Последовательность: склейка треков (`stitch_tracks`) → `geometry.build_signal` (нормированное расстояние кисть→рот `d(t)`; кадры вне ROI или с ростом < `min_person_height` дают NaN; анатомически неправдоподобная рука — длиннее `max_upper_arm`/`max_forearm`·scale или с запястьем дальше `max_wrist_outside`·scale за рамкой, обычно чужая в толпе, — в отсчёте не учитывается; эта проверка только здесь, `LightMeter` её не делает) → `cycles.detect_cycles` (конечный автомат с гистерезисом `near_enter`/`near_exit`; отброшенные циклы остаются в списке с `valid=False` и `reject_reason`; признак `head_tilt` — подъём носа над ушами в паузе, фильтр `max_head_tilt` по умолчанию выключен) → `verifier.verify` (open-vocab детектор на узком и широком кропах паузы; заполняет `direct`/`neg_fraction`/`strong_negative` и может пометить цикл невалидным; затем у людей с валидными циклами просматривает весь трек (шаг `track_scan_step`) на «двойников» сигареты из `track_negative_classes` — чупа-чупс, палочку которого в паузе принимают за сигарету — и предметы для питья из `track_drink_classes` (свои пороги `track_drink_*`; на локальных данных питьё от курения не отделяют, порог консервативный) и отбрасывает циклы рядом с находками: `reject_reason=track_object:*`) → `flash.find_flashes` + `attach_flashes` (вспышка зажигалки отмечает `flash` у валидных циклов рядом по времени; при `episode.flash_as_direct` это прямой признак) → `vapor.VaporMeter.measure` (у валидных циклов перечитывает кадры: фон до подхода руки, дымка у рта вокруг конца паузы; заполняет `vapor`/`vapor_net`, `nan` — человек идёт или зону закрыли соседи; при `episode.vapor_as_direct` это прямой признак; кэш в памяти, как у верификатора) → `appearance.AppearanceScorer.score` (CLIP ViT-L/14@336 без дообучения на кропах «рот + кисть» в кадрах паузы: два вида кропа, `mouth_scale`/`wide_scale` роста, у каждого свой словарь «курит / не курит»; оценка цикла — сумма по видам максимума по кадрам; цикл ниже `min_score` без прямого признака (`episodes.has_evidence`) невалиден, `reject_reason=appearance:*`; от `direct_score` — `look`, прямой признак при `episode.appearance_as_direct`; невалидный цикл, отброшенный верификатором за предмет из `rescue_objects` или поиском циклов только по причинам из `rescue_reasons`, тоже оценивается и от `rescue_score` снова валиден (`rescued_from`; верификатор, вспышка и пар такой цикл уже не видели); отличает курение от питья и касания лица, чего признаки позы не делают; модель не загрузилась — стадия выключается с предупреждением; кэш в памяти по циклу и отпечатку сигналов) → `episodes.build_events` (правило эпизода, объединение, confidence; цикл, начавшийся не позже `min_cycle_gap` после конца предыдущего, — то же движение (`joined_prev`) и в `min_cycles` отдельно не идёт; рамка события — медиана рамок трека в ±`box_window` от пика; `Event.passed` = confidence ≥ порога и нет `reject_reason` — событие отклоняется, если «чужие» предметы видны в ≥ `event_negative_fraction` его циклов без прямого признака).
+1. **`Pipeline.track()`** (`smokedet/tracking.py`) — тяжёлая: YOLO-pose + ByteTrack на каждом `stride`-м кадре, уточнение
+   позы мелких людей на кропе, `flash.LightMeter` (пересвет у рта/кисти). Результат — `TrackSet` (bbox + 17 точек COCO +
+   `light`), не зависит от ROI и порогов, кэшируется в `<out>/cache/<clip_id>_tracks.pkl`. Ключ (`pipeline.track_cache_key`) —
+   видео (размер, mtime) + хэш секций `detector`/`video` + хэш YAML трекера. Время наблюдения — pts кадра (`io_video.FrameClock`:
+   в CCTV с переменным fps `idx/fps` уходит до 0.7 с); `render.py` считает время так же.
+2. **`Pipeline.analyze(clip, trackset, cfg)`** — лёгкая, зависит только от порогов; `tune.py` вызывает её много раз
+   (подбор — `smokedet/tuning.py`). Цепочка: `stitch_tracks` → `geometry.build_signal` (`d(t)` кисть→рот) →
+   `cycles.detect_cycles` → `verifier.verify` (open-vocab детектор в паузе и по треку) → `flash` → `vapor` →
+   `appearance` (CLIP zero-shot по кропам «рот + кисть») → `episodes.build_events`. Отброшенные циклы остаются с
+   `valid=False` и `reject_reason`; `appearance` может вернуть цикл (`rescued_from`). `export.event_records` берёт только
+   события с `passed`.
 
-Далее `export.event_records` берёт только события с `passed`, а `render.py` строит ролик с отметками по уже готовому `Analysis`.
-
-Веб-интерфейс для показа (`ui.py`, `smokedet/ui/`) — тоже поверх готового `Analysis`: `ui/server.ClipStore` в фоновом потоке
-по очереди делает `track` (кэш; прогресс через колбэк `on_progress` трекера) → `analyze` → `ui/payload.build_payload` (JSON:
-отсчёты треков с 17 точками, циклы, события, вспышки, контуры ROI, лента с русскими текстами). У циклов, событий и строк ленты
-есть `reveal_t` — момент, к которому анализ о них «знает» (цикл — конец, принятое событие — конец цикла, выполнившего правило,
-отклонённое — конец события); фронтенд (`ui/static/app.js`, без CDN и сборки) в режиме повтора показывает только открытое к
-текущему времени. Видео играет браузер; время анализа — pts кадра, как `currentTime`/`mediaTime`, поэтому разметка совпадает
-с кадром без пересчёта. Сервер — stdlib `ThreadingHTTPServer` только на 127.0.0.1, видео отдаётся с HTTP Range (без него браузер
-не перематывает), не-H.264 перекодируется ffmpeg в `<out>/ui/`. Причины отказа и названия классов верификатора переводятся в
+Веб-интерфейс (`ui.py`, `smokedet/ui/`) — поверх готового `Analysis`; `reveal_t` у циклов/событий — момент, к которому
+анализ о них «знает», фронтенд в повторе показывает только открытое. Время анализа — pts, как `currentTime` браузера.
+Видео отдаётся с HTTP Range (без него не работает перемотка). Причины отказа и классы верификатора переводятся в
 `payload.CYCLE_REASONS`/`OBJECT_NAMES` — новую причину или класс добавляйте туда.
 
-Мониторинг (`monitor.py`, `smokedet/monitor/`, страница `ui/static/wall.html` + `scene.js`/`webm.js`/`wall.js`) — только
-стандартная библиотека, пайплайн импортируется лениво (`analysis.PipelineAnalyzer`), поэтому сервер работает и без
-torch/cv2. Камеры — симуляция на сервере (`cameras.CameraWall`): шаг 0.1 с даёт эфир (SSE `/api/live`), кольцевой буфер
-архива, эпизоды в журнале и фрагменты (`EpisodeSink.close` пишет кадры позы в `<out>/clips/*.json`). Журнал — sqlite
-(`journal.Journal`): `detection` всегда `auto`, решение оператора — отдельное поле `review`; `purge` удаляет файлы с
-истёкшим `clip_expires_at`/`expires_at`, записи остаются. Состояние камеры (`health_script`) не связано с тревогами:
-при «Нет сигнала»/«Ошибка» кадры не пишутся, при «Анализируется» кадры есть, а выводов нет. Формат кадра —
-`Person.encode` ↔ `Scene.decode` в `scene.js`: меняйте оба. `parse_range` продублирован из `ui/server.py`, потому что
-тот модуль импортирует cv2. Тесты — `tests/test_monitor.py`.
-Потоковый режим (`run_rt.py`, `smokedet/realtime.py`, перебор — `tools/tune_rt.py`) — отдельный путь, `Pipeline.track`/`analyze`
-не использует, общие с конвейером только `geometry.build_signal`, `cycles.detect_cycles`, `episodes.build_events` и
-`appearance`. `iter_stream` берёт кадры на сетке pts (`Ticker`: `sparse_fps` 1 Гц и `dense_fps`). `RealtimeSession._sparse_step`:
-yolo11n `PersonDetector` → `SparseTracker` (жадно по IoU/центрам) → `CropPose` (кропы letterbox в квадрат `pose_imgsz`, батчем)
-→ `d` кисть→рот → при `d < trigger_dist` задание `PersonJob` с бэкфиллом из кольцевого буфера `FrameRing` по рамкам
-`interp_box` → `_drop_duplicates`. `_dense_step` — поза на кропах активных заданий; рамка кропа — `PersonJob.predict_box`
-(последняя найденная, сдвинутая по скорости центра за `motion_window`; без этого идущий человек уходит из кропа,
-пока детектор его не видит, — так терялся sm_7). `PersonJob.finalize` на каждом шаге 1 Гц гоняет `build_signal` +
-`detect_cycles` по хвосту `finalize_window`, цикл фиксируется через `lookaround` + 1 с после конца; `start_hold` снимает
-`no_approach` у паузы в начале потока. Стадия 4 (`realtime.objects`, по умолчанию вкл.) — CLIP по кропам, сохранённым
-в памяти (`store_crop`/`score_from_memory`); при `objects_per_event` порог `appearance.min_score` проверяет `rt_events` по
-лучшему циклу события (`keep_cycle` оставляет слабые циклы валидными), а не по каждому циклу, как в основном конвейере.
-Правило режима — `realtime.rule_overrides` (`load_rt_config`: YAML → rule_overrides → `--set`), подобрано `tune_rt.py` так,
-чтобы все 19 true-клипов разметки дали событие. Кэш `<out>/cache/<clip>_rt.pkl`: ключ — видео + секция `realtime` кроме
-`RULE_FIELDS` + geometry/tracking/video; параметр, не влияющий на отсчёты стадий 1–3, добавляйте в `RULE_FIELDS`, иначе
-он без нужды сбросит кэш. `analyze()` без заданий в памяти повторяет шаги из кэша (`replay_job`), поэтому `tune_rt.py`
-даёт то же, что поток; CLIP при повторе перечитывает кадры пауз из видео (первая точка сетки долгая). Нагрузка `load` в
-`realtime_log.csv` — время / длительность (≤ 1 — успевает), `realtime_factor` в `processing_log.csv` — обратная величина,
-как у `run.py`. `CropPose` прогревает все размеры батча 1..`POSE_BATCH`: новая форма входа на CUDA стоит ~0.8 с.
-Два GPU-прогона одновременно искажают `load`.
+Мониторинг (`monitor.py`, `smokedet/monitor/`, `ui/static/wall.html`) — только stdlib, пайплайн импортируется лениво
+(`analysis.PipelineAnalyzer`), сервер работает без torch/cv2. В журнале `detection` всегда `auto`, решение оператора —
+поле `review`. Формат кадра — `Person.encode` ↔ `Scene.decode` в `scene.js`: меняйте оба. `parse_range` продублирован из
+`ui/server.py`, потому что тот импортирует cv2.
 
-Неочевидные моменты:
-- `configs/default.yaml` обязан совпадать с dataclass-значениями по умолчанию в `smokedet/config.py`; это проверяет `test_config_roundtrip`. При добавлении параметра правьте оба файла. Неизвестные ключи в YAML или `--set` вызывают ошибку. Значения приводятся к типу значения по умолчанию (`config._coerce`): `--set detector.device=0` — строка `"0"`, а не число, одиночная строка для списка классов — список из одного элемента.
-- Относительные пути к весам и конфигу трекера считаются от корня проекта (`pipeline.project_path`), пути в CSV со списком клипов — от самого CSV.
-- Трекер сбрасывается между клипами вызовом `model.track(..., persist=False)` на первом кадре клипа. Уточнение позы использует **отдельный** экземпляр `YOLO`: `predict()` на основной модели запустил бы колбэки трекера.
-- Константы замера света (`SAT`, `BG_*`, `ZONE_RADIUS` в `smokedet/flash.py`) влияют на кэш треков, но не входят в его ключ: при их изменении поднимайте `tracking.CACHE_VERSION`. `flash.py` импортирует `geometry`, а та — `tracking`, поэтому `tracking` импортирует `LightMeter` лениво внутри `run()`.
-- Кадры для верификатора и пара перечитывает `io_video.FrameReader` по последовательному индексу, как у трекера. Каждая стадия читает видео за один проход по возрастанию номера кадра (полный проход дешевле seek и возвратов назад): верификатор заранее берёт кропы и для пауз, и для просмотра треков всех людей с валидными до проверки циклами (детектор по треку потом запускается только у оставшихся), пар копит кропы цикла (`vapor.CycleFrames`) до его последнего кадра. Seek по `CAP_PROP_POS_FRAMES` в OpenCV считает номер по pts·fps и на файлах с переменным fps промахивается на величину дрейфа, поэтому дальний переход идёт по времени кадра из трекера (pts): `reader.get(idx, t)`. Кадры с синтетическим временем (`VideoMeta.synthetic_from`, его пишет трекер; в старых кэшах поля нет — `None`) читаются подряд.
-- FP16 (`detector.half`, `verifier.half`, по умолчанию включены) действует только на CUDA: аргументы даёт `tracking.half_kwargs` (`quantize=16`). Не передавайте `half` в ultralytics: в 8.4 он устарел, и любое его значение даёт предупреждение на каждом кадре. FP16 трекера на RTX 2060 ускоряет трекинг в ~1.6 раза, но сдвигает точки позы: пограничные циклы меняются, на `true_14` событие перешло на другого человека. Пороги подбирайте в том же режиме, в каком будет финальный прогон.
-- `run.py --workers N` (`pipeline.process_clips`) обрабатывает клипы в N процессах (spawn: CUDA не переносит fork), у каждого свои модели. На 6 ГБ с CLIP-L два процесса занимают 5.6 ГБ и медленнее одного (41 против 27.5 мин на true+false), выигрыш — только на GPU с большей памятью. Результаты пишутся в порядке списка клипов; полоса прогресса трекера в процессах выключена.
-- Кэш верификатора — в памяти, по ключу `(clip_id, frame_idx, рамка кропа, imgsz, FP16, словарь, порог предсказания)`; модель запускается с `PREDICT_CONF`, а `cfg.conf` применяется при агрегации, поэтому сетки tune.py по conf, геометрии, imgsz и спискам классов дают свежие результаты (при смене классов словарь задаётся заново). Кэш пара (`VaporMeter`) включает отпечаток сигналов клипа. Если open-vocab модель не загрузилась (нет CLIP или весов), верификатор переключается на COCO-модель и работает только с негативными классами.
-- Словарь YOLO-World «запекается» в `weights/<модель>-vocab-<хэш списка классов>.pt` (без кэшированного CLIP, ~26 МБ): если файл есть, CLIP не нужен. После правки списков классов запустите `tools/prepare_weights.py` с интернетом, иначе офлайн верификатор откатится на COCO. В `manifest.json` — фактический файл весов и `clip_used`.
-- CLIP для `appearance` (`weights/ViT-L-14-336px.pt`, ~0.9 ГБ) скачивает `tools/prepare_weights.py`; без файла офлайн стадия выключится. Обученные на своих клипах классификаторы (поза, эмбеддинги MViT/CLIP) проверять «оставить камеру» и AUC внутри клипа: у многих камер все циклы одного класса, и «оставить клип» показывает AUC 0.8 у модели, которая выучила камеру (внутри клипа 0.4–0.5).
-- `manifest.json` пишет git-коммит с суффиксом `-dirty`, если есть незакоммиченные изменения в отслеживаемых файлах (неотслеживаемые видео и `runs/` не в счёт). Перед финальным прогоном код должен быть закоммичен.
-- Обмен с CVAT (`smokedet/cvat.py`): номер кадра CVAT — последовательный индекс, как у трекера, а секунды переводятся по pts наблюдений из кэша треков (`FrameTime`), поэтому импорт требует тот же кэш, что и экспорт. Неизменяемые атрибуты трека пишутся в каждый `<box>`: CVAT берёт их из рамок. Трек без завершающей рамки `outside` в CVAT виден до конца видео.
-- Формат эталона в `smokedet/evaluation.py::parse_items` — предположение. Если организатор выдаст валидатор и формат, адаптировать нужно эту функцию.
+Потоковый режим (`run_rt.py`, `smokedet/realtime.py`) — отдельный путь без `Pipeline.track`/`analyze`; общие только
+`build_signal`, `detect_cycles`, `build_events` и `appearance`. 1 Гц детектор + трекер + поза на кропах, при подходе руки
+ко рту — плотная проверка человека (`PersonJob`). Порог `appearance.min_score` при `objects_per_event` проверяется по
+лучшему циклу события, а не по каждому. Правило режима — `realtime.rule_overrides` (YAML → rule_overrides → `--set`).
+Кэш `<out>/cache/<clip>_rt.pkl`: ключ включает секцию `realtime` кроме `RULE_FIELDS` — параметр, не влияющий на отсчёты
+стадий 1–3, добавляйте в `RULE_FIELDS`, иначе он сбросит кэш. Повтор из кэша (`replay_job`) даёт то же, что поток.
+`load` в `realtime_log.csv` — время / длительность (≤ 1 — успевает); два GPU-прогона одновременно его искажают.
 
-Веса скачиваются ultralytics автоматически в `weights/` (git их не отслеживает); `tools/prepare_weights.py` скачивает все веса конфига (вкл. COCO-откат `yolo11s.pt`) и запекает словарь — запускать до выезда. Pose-модель — `yolo11m-pose`. `yolo26m-pose` полностью совместим и по COCO mAP выше, но на разметке пользователя (FP16, RTX 2060) хуже: F1 0.54 против 0.62 (у yolo26 перебраны только min_score и direct_score), поза на ~10 % медленнее; `yolo11x-pose` — F1 0.56 (лучшая точка своей сетки), трекинг в 2.3 раза дольше. На эталоне организатора сравнение стоит повторить. TensorRT-engine позы (`tools/export_trt.py`, `--set detector.pose_model=weights/yolo11m-pose-fp16-dyn1280.engine`) ускоряет трекинг в ×1.24, но на разметке F1 0.583 против 0.627 — опция, не умолчание; engine собран на батч 1, поэтому уточнение на кропах берёт `.pt` рядом (`tracking.refine_model_path`), а при смене модели меняется ключ кэша треков.
+## Неочевидные моменты
+
+- `configs/default.yaml` обязан совпадать с dataclass-значениями в `smokedet/config.py` (`test_config_roundtrip`): новый параметр — в оба файла. Неизвестные ключи — ошибка. Значения приводятся к типу умолчания (`config._coerce`): `--set detector.device=0` — строка `"0"`.
+- Относительные пути к весам и конфигу трекера — от корня проекта (`pipeline.project_path`), пути в CSV клипов — от CSV.
+- Трекер сбрасывается между клипами `model.track(..., persist=False)`. Уточнение позы — **отдельный** экземпляр `YOLO`: `predict()` на основной модели запустил бы колбэки трекера.
+- Константы `SAT`, `BG_*`, `ZONE_RADIUS` в `smokedet/flash.py` влияют на кэш треков, но не входят в ключ: при изменении поднимайте `tracking.CACHE_VERSION`. `tracking` импортирует `LightMeter` лениво (цикл импортов flash → geometry → tracking).
+- Верификатор и пар перечитывают кадры (`io_video.FrameReader`) за один проход по возрастанию индекса. Seek `CAP_PROP_POS_FRAMES` на переменном fps промахивается, поэтому дальний переход — по pts из трекера: `reader.get(idx, t)`.
+- FP16 (`detector.half`, `verifier.half`) действует только на CUDA через `tracking.half_kwargs`. Не передавайте `half` в ultralytics 8.4 — предупреждение на каждом кадре. FP16 сдвигает точки позы и меняет пограничные события: пороги подбирайте в режиме финального прогона.
+- `run.py --workers N` — процессы spawn, у каждого свои модели; на 6 ГБ с CLIP-L два процесса медленнее одного.
+- Кэш верификатора в памяти; модель запускается с `PREDICT_CONF`, `cfg.conf` применяется при агрегации. Без open-vocab модели верификатор откатывается на COCO (только негативные классы).
+- Словарь YOLO-World запекается в `weights/<модель>-vocab-<хэш классов>.pt`. После правки списков классов запустите `tools/prepare_weights.py` с интернетом, иначе офлайн верификатор откатится на COCO. Он же качает CLIP для `appearance` (`weights/ViT-L-14-336px.pt`) и все веса конфига — запускать до выезда.
+- Классификаторы, обученные на своих клипах, проверять «оставить камеру» и AUC внутри клипа: «оставить клип» показывает AUC 0.8 у модели, выучившей камеру.
+- `manifest.json` пишет git-коммит с `-dirty` при незакоммиченных изменениях: перед финальным прогоном закоммитить код.
+- CVAT (`smokedet/cvat.py`): кадр — последовательный индекс, секунды — по pts из кэша треков, поэтому импорт требует тот же кэш, что экспорт.
+- Формат эталона в `smokedet/evaluation.py::parse_items` — предположение; при выдаче формата организатором адаптировать её.
+- Pose-модель — `yolo11m-pose`. `yolo26m-pose`, `yolo11x-pose` и TensorRT-engine (`tools/export_trt.py`) на разметке пользователя хуже по F1; на эталоне организатора сравнение стоит повторить.
