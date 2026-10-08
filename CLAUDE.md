@@ -5,8 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Контекст
 
 Кейс хакатона НТУ «Сириус» × Видеофор (8–10 октября 2026): найти эпизоды поведения, похожего на курение, в видео
-стационарных CCTV-камер (Гатчина). Требования кейса — в `Сириус_Хакатон_Видеофор.pdf`, план и обоснование
-решений — в `PLAN.md`, инструкции запуска — в `README.md`. Документация, комментарии и логи в коде — на русском.
+стационарных CCTV-камер (Гатчина). Требования кейса — в `TZ.md` (конспект `Сириус_Хакатон_Видеофор.pdf`, самого PDF
+в репозитории нет), план и обоснование решений — в `PLAN.md`, инструкции запуска — в `README.md`. Ручная разметка
+пользователя — `rasmetka.md`, из неё `tools/match_markup.py` строит `rasmetka_gt.csv` (только время, без рамок).
+Документация, комментарии и логи в коде — на русском.
 
 Правила кейса, которые влияют на код:
 - Главная метрика — Event F1. Предсказание засчитывается, если интервал совпадает с эталоном (эталон расширен на ±3 с, пересечение ≥ 1 с) **и** IoU рамки человека в `peak_sec` ≥ 0.3. Поэтому пайплайн работает по отдельным людям, а не по клипу целиком.
@@ -23,17 +25,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 обновлении пакетов пересоздавайте его через `uv pip freeze --color never`.
 
 ```bash
-.venv/bin/python -m pytest -q tests                                   # все тесты (без моделей, < 1 с)
+.venv/bin/python -m pytest -q tests                                   # все тесты (без моделей, ~8 с)
 .venv/bin/python -m pytest -q tests/test_logic.py::test_merge_gap     # один тест
 .venv/bin/python run.py --input videos/1.mp4 --camera-id cam1 --out runs/x --render   # один клип
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final     # набор клипов (CSV: video_path,camera_id[,clip_id,start_time,roi])
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final --workers 2   # клипы параллельно, по процессу на клип
 .venv/bin/python ui.py --inputs data/demo.csv --out runs/final          # веб-интерфейс повтора анализа на 127.0.0.1:8765
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report
-.venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv clip|camera|none]
+.venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv auto|clip|camera|none]
+.venv/bin/python tools/eval_markup.py --run runs/x [--run runs/y]   # оценка прогонов по rasmetka_gt.csv (только время, без IoU)
 .venv/bin/python tools/tune_markup.py --inputs runs/goal/all.csv --cache runs/goal/cache --grid appearance.min_score=4,6 --diag   # подбор по разметке пользователя (rasmetka_gt.csv), с проверкой «без камеры»
 .venv/bin/python tools/cvat_export.py --inputs ref.csv --cache runs/x/cache --out runs/cvat   # rasmetka_gt.csv + кэш треков -> XML CVAT
 .venv/bin/python tools/cvat_import.py runs/cvat_done --inputs ref.csv --cache runs/x/cache --out gt.csv   # выгрузки CVAT -> эталон
+.venv/bin/python tools/export_cycles.py --inputs ref.csv --out data/labeling/set1   # кадры циклов для ручной разметки
+.venv/bin/python tools/label_server.py --data data/labeling/set1   # веб-разметчик циклов (метки -> labels.jsonl; обучение — tools/train_cycle_clf.py)
+.venv/bin/python tools/draw_roi.py --video data/clip.mp4 --out data/roi_cam1.json   # маска ROI мышкой
 ```
 
 Любой параметр переопределяется через `--set section.key=value`. Линтера и сборки в проекте нет.
