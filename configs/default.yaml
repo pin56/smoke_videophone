@@ -118,11 +118,11 @@ appearance:                 # внешний вид цикла по CLIP (smoked
   mouth_scale: 0.35         # сторона узкого кропа «рот + кисть», доля роста человека
   wide_scale: 0.7           # сторона широкого кропа (голова, плечи, руки)
   min_score: 4.0            # цикл с меньшей оценкой без прямого признака — не курение
-  direct_score: 10.0        # оценка не ниже — у рта сигарета (look): прямой признак при episode.appearance_as_direct
-  rescue_score: 12.0        # цикл, отброшенный верификатором за предмет из rescue_objects, с такой оценкой снова валиден
+  direct_score: 12.0        # оценка не ниже — у рта сигарета (look): прямой признак при episode.appearance_as_direct
+  rescue_score: 11.5        # цикл, отброшенный верификатором за предмет из rescue_objects, с такой оценкой снова валиден
   rescue_objects: [bottle, water bottle, cup, mug, drinking glass, beverage can, can, jar, glass jar, thermos,
                    cell phone]  # YOLO-World путает кисть с сигаретой с ними; леденец и еду CLIP сам путает — их нет
-  rescue_reasons: []        # причины отказа при поиске циклов (face_hidden, no_approach, ...), которые тоже отменяет rescue_score
+  rescue_reasons: [hand_low, hand_above_mouth, face_hidden, no_approach, phone_like, long_hold] # причины отказа при поиске циклов, которые тоже отменяет rescue_score (без short_hold)
 
 episode:
   window: 20.0              # с: два полных цикла в пределах 20 с
@@ -136,7 +136,7 @@ episode:
   evidence_weight: 0.6      # вклад прямого признака
   evidence_conf_ref: 0.4    # уверенность верификатора, считающаяся «полной»
   negative_penalty: 0.5     # штраф за «чужие» предметы
-  event_negative_fraction: 0.5  # «чужой» предмет в такой доле циклов (без прямого признака) отклоняет событие
+  event_negative_fraction: 0.6  # «чужой» предмет в такой доле циклов (без прямого признака) отклоняет событие
   flash_as_direct: true     # вспышка зажигалки — прямой признак (1 цикл + вспышка = эпизод); false — только confidence
   flash_evidence: 1.0       # вклад вспышки в confidence, доля от полного прямого признака
   vapor_as_direct: true     # выдох пара — прямой признак (1 цикл + пар = эпизод)

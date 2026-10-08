@@ -155,18 +155,21 @@ class AppearanceConfig:
     mouth_scale: float = 0.35  # сторона узкого кропа «рот + кисть», доля роста человека
     wide_scale: float = 0.7  # сторона широкого кропа (голова, плечи, руки)
     min_score: float = 4.0  # цикл с меньшей оценкой без прямого признака — не курение
-    direct_score: float = 10.0  # оценка не ниже — у рта сигарета (look): прямой признак при episode.appearance_as_direct
+    direct_score: float = 12.0  # оценка не ниже — у рта сигарета (look): прямой признак при episode.appearance_as_direct
     # цикл, отброшенный верификатором за один из этих предметов, с оценкой не ниже rescue_score снова валиден:
     # YOLO-World принимает кисть с сигаретой за бутылку или стакан, а питьё и телефон CLIP отличает уверенно
     # (леденец и еду — нет, их здесь нет)
-    rescue_score: float = 12.0
+    rescue_score: float = 11.5
     rescue_objects: List[str] = field(
         default_factory=lambda: ["bottle", "water bottle", "cup", "mug", "drinking glass", "beverage can", "can",
                                  "jar", "glass jar", "thermos", "cell phone"]  # fmt: skip
     )
     # цикл, отброшенный при поиске циклов только по этим причинам (cycles.py: face_hidden, no_approach, ...),
-    # с оценкой не ниже rescue_score тоже снова валиден: поза на мелких и повёрнутых людях ошибается
-    rescue_reasons: List[str] = field(default_factory=list)
+    # с оценкой не ниже rescue_score тоже снова валиден: поза на мелких и повёрнутых людях ошибается.
+    # short_hold сюда не входит: на разметке спасённые короткие паузы чаще не курение (6 против 3)
+    rescue_reasons: List[str] = field(
+        default_factory=lambda: ["hand_low", "hand_above_mouth", "face_hidden", "no_approach", "phone_like", "long_hold"]
+    )
 
 
 @dataclass
@@ -182,7 +185,7 @@ class EpisodeConfig:
     evidence_weight: float = 0.6  # вклад прямого признака
     evidence_conf_ref: float = 0.4  # уверенность верификатора, считающаяся «полной»
     negative_penalty: float = 0.5
-    event_negative_fraction: float = 0.5  # доля циклов с «чужим» предметом, отклоняющая событие
+    event_negative_fraction: float = 0.6  # доля циклов с «чужим» предметом, отклоняющая событие
     flash_as_direct: bool = True  # вспышка зажигалки — прямой признак (1 цикл + вспышка = эпизод)
     flash_evidence: float = 1.0  # вклад вспышки в confidence, доля от полного прямого признака
     vapor_as_direct: bool = True  # выдох пара — прямой признак (1 цикл + пар = эпизод)
