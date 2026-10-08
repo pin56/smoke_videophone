@@ -147,6 +147,20 @@ python tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
     --grid episode.confidence_threshold=0.3,0.4,0.5,0.6 --grid cycle.near_enter=0.5,0.6,0.7
 ```
 
+## Разметка циклов (для обучения классификатора)
+
+```bash
+python tools/export_cycles.py --inputs data/ref.csv --out data/labeling/set1   # кадры циклов + cycles.jsonl
+python tools/label_server.py --data data/labeling/set1 --host 0.0.0.0 --port 8765   # веб-разметчик
+```
+
+`--rejected none|object|all` — какие отброшенные циклы выгружать (по умолчанию отброшенные по предметам: это «двойники»
+сигареты, самые ценные отрицательные примеры). Разметчик: клавиши S — курит, N + 1–6 — не курит (лицо, питьё, телефон,
+еда, чупа-чупс, другое), U — неясно, V — виден выдох/дым; метки пишутся в `labels.jsonl`, сводка — `/labels.csv`.
+Доступ по токену из строки запуска либо по логину и паролю: `python tools/label_server.py --users users.txt --add-user alice`
+(пароль спросят), затем запуск с `--users users.txt`; для интернета добавьте `--cert/--key` (HTTPS). Разметчик ничего не отправляет наружу; это записи объекта, поэтому порт держите
+только во внутренней сети. Папка `data/` не коммитится.
+
 ## Фиксация результата (9 октября)
 
 1. Подобрать пороги на эталоне (`tune.py`), записать лучшие в `configs/default.yaml`.
