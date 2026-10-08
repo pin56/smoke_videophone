@@ -1,5 +1,6 @@
 """Тесты логики без моделей: синтетический сигнал d(t) → циклы → события; протокол оценки; ROI."""
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,7 +14,7 @@ from smokedet.flash import Flash, LightMeter, attach_flashes, background_median,
 from smokedet.evaluation import EvalParams, Item, evaluate
 from smokedet.geometry import TrackSignal, build_signal
 from smokedet.roi import Roi
-from smokedet.tracking import PersonObs, stitch_tracks
+from smokedet.tracking import PersonObs, refine_model_path, stitch_tracks
 from smokedet.vapor import VaporMeter, measure_frame, peak_pair
 from smokedet.verifier import ObjectVerifier, reject_by_track_objects, scan_indices
 
@@ -483,3 +484,8 @@ def test_vapor_makes_single_puff_an_event():
     plain = build_events({1: two}, {1: sig2}, EpisodeConfig())[0].confidence
     two[1].vapor = True
     assert build_events({1: two}, {1: sig2}, EpisodeConfig())[0].confidence > plain
+
+
+def test_refine_model_path():
+    assert refine_model_path("weights/yolo11m-pose.pt") == "weights/yolo11m-pose.pt"
+    assert Path(refine_model_path("weights/yolo11m-pose-fp16-dyn1280.engine")) == Path("weights/yolo11m-pose.pt")
