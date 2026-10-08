@@ -12,6 +12,7 @@ from smokedet.realtime import (
     SparseTracker,
     StreamFrame,
     Ticker,
+    interp_box,
     letterbox,
     load_rt_config,
     person_cycles,
@@ -188,3 +189,10 @@ def test_stored_crop_equals_frame_crop():
     direct = square_crop(frame, cx, cy, side)
     via = square_crop(sc.img, (cx - sc.x0) * sc.k, (cy - sc.y0) * sc.k, side * sc.k)
     assert np.array_equal(direct, via)
+
+
+def test_interp_box_follows_track():
+    ts, boxes = [9.0, 10.0, 11.0], [np.array([0, 0, 10, 20.0]), np.array([10, 0, 20, 20.0]), np.array([30, 0, 40, 20.0])]
+    assert interp_box(ts, boxes, 8.0)[0] == 0  # до первого отсчёта — первая рамка
+    assert interp_box(ts, boxes, 10.5)[0] == pytest.approx(20)
+    assert interp_box(ts, boxes, 12.0)[0] == 30

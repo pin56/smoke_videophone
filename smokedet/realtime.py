@@ -45,6 +45,9 @@ from .tracking import PersonObs, box_iou, half_kwargs, select_device
 log = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
+# поля секции realtime, от которых не зависят отсчёты стадий 1–3 (не входят в ключ кэша, меняются повтором)
+RULE_FIELDS = ("objects", "rule_overrides", "finalize_window", "start_hold")
+DUP_IOU = 0.8  # два задания плотной проверки с такими рамками — один человек (рамки позы сошлись на нём)
 EPS = 1e-6
 PREFETCH = 8  # кадров плотной сетки, декодированных заранее (поток чтения работает, пока занят GPU)
 POSE_BATCH = 24  # кропов в одном вызове позы (все размеры батча прогреваются при загрузке)
@@ -214,6 +217,18 @@ def sample_features(k: np.ndarray, box: np.ndarray, geo) -> Tuple[float, Optiona
     return float(res[1]), mouth, res[0]
 
 
+def interp_box(ts: List[float], boxes: List[np.ndarray], t: float) -> np.ndarray:
+    """Рамка человека в момент t по отсчётам трека 1 Гц (линейно между соседними, за краями — крайняя):
+    кадры кольцевого буфера идущего человека берутся по его прошлому положению, а не по рамке в момент триггера."""
+    if t <= ts[0]:
+        return np.asarray(boxes[0], dtype=np.float64)
+    for i in range(1, len(ts)):
+        if t <= ts[i]:
+            a = (t - ts[i - 1]) / max(ts[i] - ts[i - 1], EPS)
+            return (1 - a) * np.asarray(boxes[i - 1], dtype=np.float64) + a * np.asarray(boxes[i], dtype=np.float64)
+    return np.asarray(boxes[-1], dtype=np.float64)
+
+
 def crop_box(box: np.ndarray, pad: float, width: int, height: int) -> Tuple[int, int, int, int]:
     x1, y1, x2, y2 = (float(v) for v in box[:4])
     pw, ph = pad * (x2 - x1), pad * (y2 - y1)
@@ -236,8 +251,9 @@ class PersonJob:
     """Плотная проверка области одного человека: отсчёты позы ~dense_fps и фиксация законченных циклов на
     шагах 1 Гц. Шаги (момент, последний ли) записываются: повтор из кэша проходит их так же, как поток."""
 
-    def __init__(self, tid: int, box: np.ndarray, until: float):
+    def __init__(self, tid: int, box: np.ndarray, until: float, t0: float = 0.0):
         self.tid = tid
+        self.t0 = t0  # начало потока: пауза в первые cycle.lookaround с не отбрасывается за no_approach
         self.box = np.asarray(box, dtype=np.float64).copy()  # рамка человека для кропа следующего кадра
         self.until = until  # после этого момента без новых срабатываний триггера задание закрывается
         self.obs: List[PersonObs] = []
@@ -273,6 +289,10 @@ class PersonJob:
                 continue  # уже зафиксирован (или его хвост в начале окна)
             if not final and now - c.end < settle:
                 break
+            if cfg.realtime.start_hold and "no_approach" in c.reject_reason.split(",") and                     c.hold_start - self.t0 <= cfg.cycle.lookaround + EPS:  # fmt: skip
+                # рука у рта уже к началу записи: подхода не видно, но цикл полный
+                reasons = [r for r in c.reject_reason.split(",") if r != "no_approach"]
+                c.reject_reason, c.valid = ",".join(reasons), not reasons
             new.append(c)
         if new:
             self._last_hold_end = new[-1].hold_end
@@ -289,12 +309,12 @@ class PersonJob:
 
     def record(self) -> dict:
         """Для кэша: только то, что нужно для повтора."""
-        return {"tid": self.tid, "obs": self.obs, "ticks": self.ticks}
+        return {"tid": self.tid, "obs": self.obs, "ticks": self.ticks, "t0": self.t0}
 
 
 def replay_job(rec: dict, cfg: Config, roi: Roi) -> PersonJob:
     """Повтор задания из кэша: те же отсчёты и шаги фиксации, что в потоке."""
-    job = PersonJob(rec["tid"], rec["obs"][0].box if rec["obs"] else np.zeros(4), 0.0)
+    job = PersonJob(rec["tid"], rec["obs"][0].box if rec["obs"] else np.zeros(4), 0.0, rec.get("t0", 0.0))
     obs, i = rec["obs"], 0
     for now, final in rec["ticks"]:
         while i < len(obs) and obs[i].t <= now + EPS:
@@ -349,8 +369,8 @@ class PersonDetector:
         self.half = half_kwargs(rc.half, device)
 
     def __call__(self, frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        r = self.model.predict(frame, imgsz=self.rc.det_imgsz, conf=self.rc.det_conf, classes=[0], device=self.device,
-                               verbose=False, **self.half)[0]  # fmt: skip
+        r = self.model.predict(frame, imgsz=self.rc.det_imgsz, conf=self.rc.det_conf, iou=self.rc.det_iou, classes=[0],
+                               device=self.device, verbose=False, **self.half)[0]  # fmt: skip
         if r.boxes is None or len(r.boxes) == 0:
             return np.zeros((0, 4)), np.zeros(0)
         return r.boxes.xyxy.cpu().numpy().astype(np.float64), r.boxes.conf.cpu().numpy().astype(np.float64)
@@ -486,7 +506,7 @@ class RtRun:
 def inference_hash(cfg: Config) -> str:
     """Параметры, от которых зависят отсчёты стадий 1–3: секция realtime (кроме правил и стадии 4), geometry и
     tracking (триггер считается по той же геометрии), видео."""
-    rc = {f.name: getattr(cfg.realtime, f.name) for f in fields(cfg.realtime) if f.name not in ("objects", "rule_overrides", "finalize_window")}
+    rc = {f.name: getattr(cfg.realtime, f.name) for f in fields(cfg.realtime) if f.name not in RULE_FIELDS}
     data = {"realtime": rc, "geometry": cfg.to_dict()["geometry"], "tracking": cfg.to_dict()["tracking"],
             "video": cfg.to_dict()["video"]}  # fmt: skip
     return hashlib.sha256(repr(sorted(data.items())).encode()).hexdigest()[:16]
@@ -540,6 +560,7 @@ class RealtimeSession:
         self.stats: Counter = Counter()
         self.tm = dict.fromkeys(STAGES, 0.0)
         self.alerts: List[dict] = []
+        self.t0: Optional[float] = None  # время первого кадра потока
         self._alerted: Dict[int, float] = {}  # человек -> конец последнего события, о котором сообщено
 
     # -- вспомогательное
@@ -566,6 +587,8 @@ class RealtimeSession:
 
     # -- шаги
     def step(self, f: StreamFrame) -> None:
+        if self.t0 is None:
+            self.t0 = f.t
         if f.sparse:
             self._sparse_step(f)
         elif self.active:
@@ -600,10 +623,12 @@ class RealtimeSession:
         has_job = [tid in self.active for tid in owners]
         res = self._pose(items, "pose_sparse")
         self.stats["people"] += len(items)
-        candidates = []
+        triggered, idle = [], []
+        seen = set()
         for tid, r, dense in zip(owners, res, has_job):
             if r is None:
                 continue
+            seen.add(tid)
             d, _, _ = sample_features(r[1], r[0], geo)
             if dense:
                 self._add(self.active[tid], f, r)
@@ -615,28 +640,56 @@ class RealtimeSession:
                 if dense:
                     self.active[tid].until = f.t + rc.dense_after
                 else:
-                    candidates.append((d, tid, r))
-        self._start_jobs(f, sorted(candidates, key=lambda x: x[0]))
+                    triggered.append((d, tid, r))
+            elif not dense:
+                idle.append((d if np.isfinite(d) else math.inf, tid, r))
+        self._drop_duplicates()
+        dropped = self._start_jobs(f, sorted(triggered, key=lambda x: x[0]))
+        if rc.fill_budget and not dropped:
+            # свободный бюджет: плотно проверяются и люди без срабатывания (ближе рука ко рту — раньше);
+            # задание продлевается, пока человек виден и слоты не нужны сработавшим
+            for job in self.active.values():
+                if job.tid in seen and job.until < f.t + 1.0 / rc.sparse_fps:
+                    job.until = f.t + 1.0 / rc.sparse_fps + EPS
+            self._start_jobs(f, sorted(idle, key=lambda x: x[0]), budget=True)
         self._finalize(f.t)
 
-    def _start_jobs(self, f: StreamFrame, candidates) -> None:
+    def _drop_duplicates(self) -> None:
+        """Два задания на одного человека (детектор дал две рамки, трекер — два id): остаётся старшее."""
+        jobs = sorted(self.active.values(), key=lambda j: self.jobs.index(j))
+        for i, a in enumerate(jobs):
+            for b in jobs[i + 1 :]:
+                if b.tid in self.active and a.tid in self.active and box_iou(a.box, b.box)[0] > DUP_IOU:
+                    del self.active[b.tid]
+                    self.jobs.remove(b)
+                    if self.last_job.get(b.tid) is b:
+                        del self.last_job[b.tid]
+                    self.stats["jobs_duplicate"] += 1
+
+    def _start_jobs(self, f: StreamFrame, candidates, budget: bool = False) -> int:
+        """Задания для кандидатов (по порядку, пока есть слоты); возвращает число не получивших слот."""
         rc = self.rc
         started = []
+        dropped = 0
         for d, tid, r in candidates:
             if len(self.active) >= rc.max_jobs:
-                self.stats["dropped_triggers"] += 1
+                dropped += 1
+                if not budget:
+                    self.stats["dropped_triggers"] += 1
                 continue
+            if any(box_iou(j.box, r[0])[0] > DUP_IOU for j in self.active.values()):
+                continue  # этого человека уже проверяет задание с другим id
             prev = self.last_job.get(tid)
             if prev is not None and f.t - prev.last_t <= rc.dense_before + EPS:
                 job = prev  # человек снова поднял руку вскоре после закрытия — то же задание, без разрыва
                 job.closed = False
-                job.until = f.t + rc.dense_after
+                job.until = f.t + (1.0 / rc.sparse_fps + EPS if budget else rc.dense_after)
                 self.stats["jobs_reopened"] += 1
             else:
-                job = PersonJob(tid, r[0], f.t + rc.dense_after)
+                job = PersonJob(tid, r[0], f.t + (1.0 / rc.sparse_fps + EPS if budget else rc.dense_after), self.t0)
                 self.jobs.append(job)
                 self.last_job[tid] = job
-                self.stats["jobs"] += 1
+                self.stats["jobs_budget" if budget else "jobs"] += 1
             job.box = np.asarray(r[0], dtype=np.float64).copy()
             self.active[tid] = job
             started.append((job, r))
@@ -644,8 +697,11 @@ class RealtimeSession:
         # кадры из кольцевого буфера (прошлое) всех новых заданий — одним батчем
         items, plan = [], []
         for job, r in started:
-            for fr in self.ring.between(max(job.last_t, f.t - rc.dense_before - EPS), f.t):
-                items.append((fr.frame, r[0]))
+            t_from = max(job.last_t, f.t - rc.dense_before - EPS)
+            hist = [(o.t, o.box) for o in self.sparse.get(job.tid, []) if t_from - 1.0 / rc.sparse_fps < o.t < f.t - EPS]
+            ts, boxes = [h[0] for h in hist] + [f.t], [h[1] for h in hist] + [r[0]]
+            for fr in self.ring.between(t_from, f.t):
+                items.append((fr.frame, interp_box(ts, boxes, fr.t)))
                 plan.append((job, fr))
         res = self._pose(items, "pose_dense")
         for (job, fr), rr in zip(plan, res):
@@ -653,6 +709,7 @@ class RealtimeSession:
                 self._add(job, fr, rr)
         for job, r in started:
             self._add(job, f, r)
+        return dropped
 
     def _finalize(self, now: float, final: bool = False) -> None:
         for tid, job in list(self.active.items()):
@@ -702,22 +759,35 @@ class RealtimeSession:
 
 
 class RealtimeDetector:
-    """Модели режима (грузятся один раз на все клипы) и обработка клипа."""
+    """Модели режима и обработка клипа. Детектор и поза грузятся при первом прогоне (повтору из кэша не нужны)
+    и прогреваются: первый вызов CUDA-моделей долгий и не должен попадать во время первого клипа."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.device = select_device(cfg.detector.device)
-        self.detect = PersonDetector(cfg, self.device)
-        self.pose = CropPose(cfg, self.device)
+        self._detect: Optional[PersonDetector] = None
+        self._pose: Optional[CropPose] = None
         self.appearance = AppearanceScorer(self.device, project_path(cfg.appearance.weights_dir))
-        self._warmup()
 
-    def _warmup(self) -> None:
-        """Первый вызов CUDA-моделей долгий (инициализация) — не в счёт времени первого клипа."""
+    def _load(self) -> None:
+        if self._detect is not None:
+            return
         t0 = time.perf_counter()
-        self.detect(np.zeros((1080, 1920, 3), dtype=np.uint8))
-        self.pose.warmup()
-        log.info("модели прогреты за %.1f с", time.perf_counter() - t0)
+        self._detect = PersonDetector(self.cfg, self.device)
+        self._pose = CropPose(self.cfg, self.device)
+        self._detect(np.zeros((1080, 1920, 3), dtype=np.uint8))
+        self._pose.warmup()
+        log.info("модели загружены и прогреты за %.1f с", time.perf_counter() - t0)
+
+    @property
+    def detect(self) -> PersonDetector:
+        self._load()
+        return self._detect
+
+    @property
+    def pose(self) -> CropPose:
+        self._load()
+        return self._pose
 
     def encoder(self, cfg: Config):
         if not cfg.realtime.objects:

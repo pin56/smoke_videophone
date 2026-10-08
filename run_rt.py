@@ -23,6 +23,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from smokedet.config import Config
 from smokedet.export import LOG_COLUMNS, event_records, write_debug, write_manifest, write_predictions, write_processing_log
@@ -54,14 +55,15 @@ def parse_args(argv=None):
     p.add_argument("--device", help="cpu | mps | 0 (по умолчанию auto)")
     p.add_argument("--objects", action="store_true", help="стадия 4: CLIP по кропам «рот + кисть» (realtime.objects)")
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш отсчётов стадий 1–3")
+    p.add_argument("--cache", help="папка кэша отсчётов (по умолчанию <out>/cache): перебор порогов повтором другого прогона")
     return p.parse_args(argv)
 
 
-def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: Path, use_cache: bool):
+def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: Path, cache_dir: Optional[Path]):
     """Клип: стадии 1–3 (или повтор из кэша) → события → строки predictions/processing_log/realtime_log."""
     key = rt_cache_key(clip.video_path, cfg)
-    cache_path = out_dir / "cache" / f"{clip.clip_id}_rt.pkl"
-    run = load_run(cache_path, key) if use_cache else None
+    cache_path = cache_dir / f"{clip.clip_id}_rt.pkl" if cache_dir else None
+    run = load_run(cache_path, key) if cache_path else None
     jobs = None
     from_cache = run is not None
     if from_cache:
@@ -69,7 +71,7 @@ def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: P
     else:
         run, jobs = det.run(clip.video_path, cfg, clip.roi_path)
         run.cache_key = key
-        if use_cache:
+        if cache_path:
             save_run(run, cache_path)
     t0 = time.perf_counter()
     roi = Roi.load(clip.roi_path, run.meta.width, run.meta.height)
@@ -145,7 +147,8 @@ def main(argv=None) -> int:
     det = RealtimeDetector(cfg)
     all_rows, log_rows, rt_rows = [], [], []
     for i, clip in enumerate(clips, start=1):
-        records, log_row, rt_row = process_clip(det, cfg, clip, out_dir, not args.no_cache)
+        cache_dir = None if args.no_cache else Path(args.cache) if args.cache else out_dir / "cache"
+        records, log_row, rt_row = process_clip(det, cfg, clip, out_dir, cache_dir)
         all_rows += records
         log_rows.append(log_row)
         rt_rows.append(rt_row)
