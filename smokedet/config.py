@@ -292,6 +292,7 @@ class ServeConfig:
     max_batch: int = 24  # кропов позы / CLIP в одном батче
     queue_sec: float = 20.0  # с кадров в очереди камеры; дальше старые кадры плотной сетки выбрасываются
     reconnect: List[float] = field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0])  # паузы переподключения, с
+    decode_threads: int = 1  # потоков декодера FFmpeg на камеру (0 — по умолчанию OpenCV: все ядра на каждую камеру)
 
 
 @dataclass

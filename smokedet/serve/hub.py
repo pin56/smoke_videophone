@@ -160,14 +160,22 @@ class Hub:
             "pose": BatchExecutor(lambda items, _: pose(items), "pose", sc.max_batch, sc.batch_wait_ms, self.workers),
         }
         self._enc = enc
+        self._warm = set()
+        self._lock = threading.Lock()
         if enc is not None:
             self.execs["clip"] = BatchExecutor(lambda crops, view: list(enc(crops, view)), "clip", sc.max_batch,
                                                sc.batch_wait_ms, self.workers)  # fmt: skip
         log.info("модели сервера: %s, исполнителей на модель %d", "GPU" if gpu else "CPU", self.workers)
 
     def warm_shape(self, height: int, width: int) -> None:
-        """Первый вызов детектора на новой форме входа долгий: до старта камер."""
-        self.models.detect(np.zeros((max(height, 32), max(width, 32), 3), dtype=np.uint8))
+        """Первый вызов детектора на новой форме входа долгий: до первого кадра камеры (через исполнитель —
+        модель не вызывается из двух потоков сразу)."""
+        shape = (max(height, 32), max(width, 32))
+        with self._lock:
+            if shape in self._warm:
+                return
+            self._warm.add(shape)
+        self.execs["detect"]([np.zeros((*shape, 3), dtype=np.uint8)])
 
     def session_models(self) -> SimpleNamespace:
         det, pose = self.execs["detect"], self.execs["pose"]
