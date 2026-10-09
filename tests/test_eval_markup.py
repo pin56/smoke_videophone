@@ -112,3 +112,11 @@ def test_duplicate_prediction(tmp_path):
     res = em.evaluate_run(em.load_gt(str(gt)), em.load_run(str(run)))
     assert (res["total"]["tp"], res["total"]["fp"], res["total"]["dup"]) == (1, 1, 1)
     assert res["total"]["f1_nodup"] == 1.0
+
+
+def test_coverage_counts_point_marks():
+    """Отметка-точка (подъём = затяжка = опускание) внутри предсказания — попадание."""
+    g = em.ClipGT("x", "true", episodes=[(5.0, 20.0, 3)], marks=[(5.0, 5.0), (12.0, 12.0), (30.0, 30.0)])
+    hit, inside, total = em.coverage(g, [{"start_sec": "4", "end_sec": "13"}])
+    assert hit == 2
+    assert (inside, total) == (8.0, 15.0)
