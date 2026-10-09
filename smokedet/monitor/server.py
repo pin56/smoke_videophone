@@ -162,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                 kw = {k: q.get(k) for k in ("source_type", "source_id", "review")}
                 for k in ("since", "until"):
                     kw[k] = float(q[k]) if k in q else None
-                kw["limit"] = min(int(q.get("limit", 200)), 1000)
+                kw["limit"] = max(1, min(int(q.get("limit", 200)), 1000))  # LIMIT < 0 в sqlite — без ограничения
             except ValueError:
                 return self._error(HTTPStatus.BAD_REQUEST, head)
             return self._json([event_view(e) for e in s.journal.events(**kw)], head)
@@ -256,8 +256,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(HTTPStatus.NOT_FOUND, False)
 
     def _body_json(self):
-        n = int(self.headers.get("Content-Length") or 0)
         try:
+            n = max(0, min(int(self.headers.get("Content-Length") or 0), 1 << 20))
             return json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             return None
@@ -266,7 +266,10 @@ class Handler(BaseHTTPRequestHandler):
         s = self.server
         name = Path(unquote(self.headers.get("X-Filename") or "")).name
         ext = Path(name).suffix.lower()
-        size = int(self.headers.get("Content-Length") or 0)
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            size = 0
         if not name or ext not in VIDEO_EXT:
             self._drain(size)
             return self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, False, f"нужен видеофайл: {', '.join(sorted(VIDEO_EXT))}")
