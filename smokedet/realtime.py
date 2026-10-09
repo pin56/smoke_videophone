@@ -49,8 +49,8 @@ log = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
 # поля секции realtime, от которых не зависят отсчёты стадий 1–3 (не входят в ключ кэша, меняются повтором)
-RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", "rule_overrides", "finalize_window",
-               "start_hold", "threads", "skip_confirmed")  # fmt: skip
+RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", "many_median", "rule_overrides",
+               "finalize_window", "start_hold", "threads", "skip_confirmed")  # fmt: skip
 # поля, добавленные после первых прогонов: в ключ кэша входят, только если отличаются от этих значений (старые кэши
 # остаются действительны)
 HASH_DEFAULTS = {"alert_hold": 0.0, "ov_precision": ""}
@@ -525,7 +525,9 @@ def rt_events(cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], c
     без прямого признака отклоняется, если лучшая оценка CLIP его циклов ниже appearance.min_score. Порог по
     каждому циклу (как в run.py) теряет true-клипы: у курящего вдалеке «похожа» на курение одна пауза из нескольких.
     Если CLIP оценил не меньше realtime.many_cycles циклов события, лучшая оценка должна быть не ниже
-    many_min_score: человек много раз подносит руку ко рту, а сигареты не видно ни разу — питьё, касание лица."""
+    many_min_score: человек много раз подносит руку ко рту, а сигареты не видно ни разу — питьё, касание лица.
+    Или медиана оценок не ниже realtime.many_median (если > 0): у долгого курения сигарета видна в большинстве пауз,
+    но ни в одной уверенно, а у питья и касания лица «похожих» пауз одна-две."""
     events = build_events(cycles, signals, cfg.episode)
     rc = cfg.realtime
     if not (rc.objects and rc.objects_per_event):
@@ -537,7 +539,8 @@ def rt_events(cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], c
         best = max(scores)
         if best < cfg.appearance.min_score:
             e.passed, e.reject_reason = False, f"appearance:{best:.2f}"
-        elif rc.many_cycles > 0 and len(scores) >= rc.many_cycles and best < rc.many_min_score:
+        elif (rc.many_cycles > 0 and len(scores) >= rc.many_cycles and best < rc.many_min_score
+              and not (rc.many_median > 0 and np.median(scores) >= rc.many_median)):
             e.passed, e.reject_reason = False, f"many_cycles:{len(scores)}:{best:.2f}"
     return events
 
@@ -661,7 +664,16 @@ def load_run(path: Path, key: str) -> Optional[RtRun]:
     run = data.get("run")
     if data.get("version") != CACHE_VERSION or run is None or run.cache_key != key:
         return None
+    fix_frame_count(run)
     return run
+
+
+def fix_frame_count(run: RtRun) -> None:
+    """Число кадров — по декодированным: в webm CAP_PROP_FRAME_COUNT бывает в десятки раз больше настоящего,
+    а от него считаются длительность клипа, load и часы набора."""
+    n = run.stats.get("decoded_frames", 0)
+    if n > 0:
+        run.meta.frame_count = n
 
 
 # ---------------------------------------------------------------- поток
@@ -1019,6 +1031,7 @@ class RealtimeDetector:
         stats["decoded_frames"] = stream_stats.get("decoded_frames", 0)
         run = RtRun(meta=meta, jobs=[j.record() for j in ses.jobs], sparse=dict(ses.sparse), stats=stats,
                     timings=dict(ses.tm), wall_time=wall, alerts=ses.alerts)  # fmt: skip
+        fix_frame_count(run)
         return run, ses.jobs
 
 

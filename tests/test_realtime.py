@@ -17,6 +17,7 @@ from smokedet.realtime import (
     Ticker,
     alert_change,
     dropped_alert,
+    fix_frame_count,
     inference_hash,
     interp_box,
     keep_cycle,
@@ -292,6 +293,8 @@ def test_many_cycles_without_cigarette():
     assert [e.passed for e in rt_events(cycles, signals, cfg)] == [True]
     job.cycles[2].appearance = 9.0
     assert [e.passed for e in rt_events(cycles, signals, with_overrides(cfg, ["realtime.many_cycles=0"]))] == [True]
+    assert [e.passed for e in rt_events(cycles, signals, with_overrides(cfg, ["realtime.many_median=5"]))] == [True]
+    assert [e.passed for e in rt_events(cycles, signals, with_overrides(cfg, ["realtime.many_median=5.5"]))] == [False]
     job.cycles[0].direct = True  # прямой признак (предмет у рта) правило не снимает
     assert [e.passed for e in rt_events(cycles, signals, cfg)] == [True]
 
@@ -354,3 +357,15 @@ def test_new_realtime_fields_in_cache_key_only_when_set():
     assert inference_hash(cfg) == inference_hash(with_overrides(cfg, ["realtime.skip_confirmed=true"]))
     assert inference_hash(cfg) != inference_hash(with_overrides(cfg, ["realtime.alert_hold=20"]))
     assert inference_hash(cfg) != inference_hash(with_overrides(cfg, ["realtime.ov_precision=f32"]))
+
+
+def test_fix_frame_count_webm():
+    """webm: CAP_PROP_FRAME_COUNT завышен — длительность по декодированным кадрам; без счётчика — как было."""
+    from smokedet.io_video import VideoMeta
+
+    run = SimpleNamespace(meta=VideoMeta("x.webm", 25.0, 82891, 1920, 1080), stats={"decoded_frames": 2045})
+    fix_frame_count(run)
+    assert run.meta.duration == pytest.approx(81.8)
+    old = SimpleNamespace(meta=VideoMeta("x.mp4", 25.0, 250, 640, 480), stats={})
+    fix_frame_count(old)
+    assert old.meta.frame_count == 250
