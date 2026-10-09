@@ -57,10 +57,20 @@ source .venv/bin/activate
 uv pip install --python .venv/Scripts/python.exe -r requirements.lock     --extra-index-url https://download.pytorch.org/whl/cu126 --index-strategy unsafe-best-match
 ```
 
-Веса в git не входят (ViT-L/14 — 0.9 ГБ). В архиве сдачи `smokedet.zip` веса потокового режима уже лежат в
-`weights/`: `yolo11n.pt`, `yolo11m-pose.pt`, `ViT-L-14.pt` (CLIP OpenAI) и для CPU — `yolo11n_openvino_model/`,
-`yolo11m-pose_openvino_model/`, `ViT-L-14-visual168_openvino/`. Из git — скачать **до выезда на объект** (там может
+Веса в git не входят (ViT-L/14 — 0.9 ГБ), они лежат в релизе
+[v1.1](https://github.com/pin56/smoke_videophone/releases/tag/v1.1): `yolo11n.pt`, `yolo11m-pose.pt`, `ViT-L-14.pt`
+(CLIP OpenAI) и для CPU — `yolo11n_openvino_model`, `yolo11m-pose_openvino_model`, `ViT-L-14-visual168_openvino`
+(zip). `run_rt.py` и `serve.py` сами докачивают недостающие в `weights/` и сверяют sha256 (`smokedet/weights.py`).
+Репозиторий закрытый: нужен `GH_TOKEN`/`GITHUB_TOKEN` или `gh auth login`. Заранее, **до выезда на объект** (там может
 не быть интернета):
+
+```bash
+python tools/fetch_weights.py                                     # все веса релиза (GPU и CPU), 2.3 ГБ
+python tools/fetch_weights.py --config configs/serve_cpu.yaml     # только нужные профилю
+```
+
+В архиве сдачи `smokedet.zip` веса уже лежат в `weights/`. Без доступа к релизу — скачать из первоисточников и
+экспортировать IR:
 
 ```bash
 python tools/prepare_weights.py --config configs/serve_gpu.yaml   # GPU: .pt + словарь YOLO-World *-vocab-<хэш>.pt
