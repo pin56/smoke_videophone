@@ -169,7 +169,8 @@ Inter с Google Fonts (без сети — системный шрифт), ви�
    берутся из памяти, видео не перечитывается. Событие без прямого признака проходит, если лучший его цикл набрал
    `appearance.min_score` (0.5, `realtime.objects_per_event`). Если CLIP оценил не меньше `realtime.many_cycles` (5)
    циклов события, лучшая оценка должна быть не ниже `many_min_score` (10): человек много раз подносит руку ко рту,
-   а сигареты не видно ни разу — питьё, касание лица. Уже выданная тревога тогда снимается (запись `withdrawn` в
+   а сигареты не видно ни разу — питьё, касание лица. Или медиана оценок не ниже `many_median` (0 — выключено,
+   в профиле CPU 3.5): у долгого курения сигарета видна в большинстве пауз, но ни в одной уверенно. Уже выданная тревога тогда снимается (запись `withdrawn` в
    `debug/<clip>_rt.json`, колонка `alerts_withdrawn`), а подтвердившись снова, выдаётся заново. Без этой стадии —
    `--no-objects`. Тревога снимается и у задания, удалённого как второе на того же человека (причина
    `duplicate:<id>`): его события в итоги не попадают.
@@ -221,7 +222,7 @@ python run_rt.py --inputs runs/rt/all.csv --out runs/cpu/l168 --device cpu \
     --set realtime.det_model=weights/yolo11n_openvino_model --set realtime.pose_model=weights/yolo11m-pose_openvino_model \
     --set realtime.skip_confirmed=true --set appearance.model=ViT-L/14 --set appearance.input_px=168 \
     --set appearance.tight_scale=0.2 --set appearance.frame_agg=top2 \
-    --set appearance.direct_score=9 --set appearance.rescue_score=9 --set appearance.min_score=0
+    --set appearance.direct_score=9 --set appearance.rescue_score=9 --set appearance.min_score=0     --set realtime.many_median=3.5
 ```
 
 Перед первым запуском с новым `input_px` — `tools/prepare_weights.py` с теми же `--set` (экспорт IR CLIP).
@@ -235,7 +236,14 @@ python run_rt.py --inputs runs/rt/all.csv --out runs/cpu/l168 --device cpu \
 | CLIP L/14@336 | 0.472 | 19/19 | 64/80 | 83 % | 18 | 0.37 / 1.30 |
 | L/14@224, `skip_confirmed`, `tight_scale` 0.2, top2 | 0.472 | 19/19 | 64/80 | 83 % | 17 | 0.28 / 0.94 |
 | то же + разрез длинной паузы (`cycle.split_*`) | 0.455 | 19/19 | 77/80 | 97 % | 20 | 0.30 / 1.00 |
-| **L/14@168, пороги CLIP 9/9/0 (команда выше)** | **0.472** | **19/19** | **77/80** | **93 %** | **19** | **0.22 / 0.72** |
+| L/14@168, пороги CLIP 9/9/0 | 0.472 | 19/19 | 77/80 | 93 % | 19 | 0.22 / 0.72 |
+| **то же + `many_median` 3.5 (команда выше)** | **0.472** | **19/19** | **77/80** | **97 %** | **20** | **0.22 / 0.72** |
+
+На наборе студентов (17 клипов с курением `smoke1..17`, разметка `students_gt.csv`, проверка разметки —
+`tools/label_server.py --data data/labeling/students`) `many_median` 3.5 поднимает F1 0.460 → 0.489, затяжки
+71/302 → 152/302, время 22 → 49 %: у долгого курения сигарета видна средне в большинстве пауз, и правило
+`many_cycles` без медианы отбрасывало такие события. Длительность webm считается по декодированным кадрам
+(`CAP_PROP_FRAME_COUNT` в webm завышен в десятки раз).
 
 CLIP L/14 на CPU: 43.6 мс на кроп при 224 px, 24.6 — при 168, 16.9 — при 140 (140 px — 18/19 при `min_score` 0).
 Хуже по качеству при той же цене: ViT-B/32, B/16, MobileCLIP2-S2/S4/B и SigLIP2-B/16 (`appearance.model=oc:…`,
