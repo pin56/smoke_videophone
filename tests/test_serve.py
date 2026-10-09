@@ -330,3 +330,22 @@ def test_merge_parts_as_one_server(tmp_path, monkeypatch):
     assert {p.stem for p in (tmp_path / "debug").glob("*.json") if not p.stem.endswith("_rt")} == {"a0", "a1", "b0"}
     assert len((tmp_path / "alerts.jsonl").read_text(encoding="utf-8").splitlines()) == m["alert_latency_wall"]["n"] + m["alerts_withdrawn"]
     assert json.loads((tmp_path / "serve_summary.json").read_text(encoding="utf-8"))["level_share"] == {"0": 1.0}
+
+
+def test_emulated_specs_needs_clips():
+    from smokedet.serve.server import emulated_specs
+
+    with pytest.raises(ValueError):
+        emulated_specs([], {}, 2)
+
+
+def test_camera_dropped_queue_reads_source_once():
+    from collections import Counter
+    from types import SimpleNamespace
+
+    from smokedet.serve.server import Camera
+
+    cam = SimpleNamespace(counts=Counter(dropped_queue=2), src=SimpleNamespace(stats={"dropped_queue": 3}))
+    assert Camera.dropped_queue(cam) == 5
+    cam.src = None  # сегмент закончился: счётчик источника уже прибавлен к counts
+    assert Camera.dropped_queue(cam) == 2

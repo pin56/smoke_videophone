@@ -264,10 +264,14 @@ class PersonJob:
     так же, как поток. Число отсчётов нужно, потому что после повторного открытия задания бэкфилл из кольцевого
     буфера дописывает отсчёты с временем раньше прошлого шага: по времени повтор отдал бы их не тому шагу."""
 
-    def __init__(self, tid: int, box: np.ndarray, until: float, t0: float = 0.0, fps: float = 0.0):
+    def __init__(self, tid: int, box: np.ndarray, until: float, t0: float = 0.0, fps: float = 0.0,
+                 stream_fps: float = 0.0):
         self.tid = tid
         # частота отсчётов плотной проверки (сервер снижает её под нагрузкой); 0 — каждый кадр плотной сетки потока
         self.fps = fps
+        # частота плотной сетки потока при fps=0: ступень сервера меняет cfg.realtime.dense_fps на лету,
+        # а сетка потока остаётся прежней; 0 — сетка равна cfg.realtime.dense_fps (повтор из кэша, run_rt)
+        self.stream_fps = stream_fps
         self._tick = Ticker(1.0 / fps) if fps > 0 else None
         self.t0 = t0  # начало потока: пауза в первые cycle.lookaround с не отбрасывается за no_approach
         self.box = np.asarray(box, dtype=np.float64).copy()  # рамка человека для кропа следующего кадра
@@ -285,7 +289,9 @@ class PersonJob:
         return self.obs[-1].t if self.obs else -math.inf
 
     def rate(self, cfg: Config) -> float:
-        return self.fps if self.fps > 0 else cfg.realtime.dense_fps
+        if self.fps > 0:
+            return self.fps
+        return self.stream_fps if self.stream_fps > 0 else cfg.realtime.dense_fps
 
     def wants(self, t: float) -> bool:
         """Брать ли кадр плотной сетки t (вызывается по кадрам в порядке времени): при своей частоте задания —
@@ -332,7 +338,7 @@ class PersonJob:
                 continue  # уже зафиксирован (или его хвост в начале окна)
             if not final and now - c.end < settle:
                 break
-            if cfg.realtime.start_hold and "no_approach" in c.reject_reason.split(",") and                     c.hold_start - self.t0 <= cfg.cycle.lookaround + EPS:  # fmt: skip
+            if cfg.realtime.start_hold and "no_approach" in c.reject_reason.split(",") and c.hold_start - self.t0 <= cfg.cycle.lookaround + EPS:  # fmt: skip
                 # рука у рта уже к началу записи: подхода не видно, но цикл полный
                 reasons = [r for r in c.reject_reason.split(",") if r != "no_approach"]
                 c.reject_reason, c.valid = ",".join(reasons), not reasons
@@ -479,8 +485,9 @@ class CropPose:
             from ultralytics import YOLO
 
             self.model = YOLO(path)
-        if (self.ov or self.model).task != "pose":
-            raise ValueError(f"{rc.pose_model}: нужна pose-модель, получена задача '{self.model.task}'")
+        task = (self.ov or self.model).task
+        if task != "pose":
+            raise ValueError(f"{rc.pose_model}: нужна pose-модель, получена задача '{task}'")
         self.half = half_kwargs(rc.half, device)
 
     def warmup(self) -> None:
@@ -889,7 +896,8 @@ class RealtimeSession:
                 self.stats["jobs_reopened"] += 1
             else:
                 fps = rc.dense_fps if rc.dense_fps < self.stream_fps - EPS else 0.0
-                job = PersonJob(tid, r[0], f.t + (1.0 / rc.sparse_fps + EPS if budget else rc.dense_after), self.t0, fps)
+                job = PersonJob(tid, r[0], f.t + (1.0 / rc.sparse_fps + EPS if budget else rc.dense_after), self.t0, fps,
+                                self.stream_fps)
                 self.jobs.append(job)
                 self.last_job[tid] = job
                 self.stats["jobs_budget" if budget else "jobs"] += 1

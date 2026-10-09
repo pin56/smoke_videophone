@@ -416,3 +416,20 @@ def test_job_fps_subsamples_dense_frames():
         rep = [replay_job(j.record(), cfg, Roi.full()) for j in ses.jobs]
         assert [j.fps for j in rep] == [j.fps for j in ses.jobs]
         assert [(c.start, c.end) for j in rep for c in j.cycles] == [(c.start, c.end) for j in ses.jobs for c in j.cycles]
+
+
+def test_job_rate_keeps_stream_grid_after_ladder():
+    base = Config().realtime.dense_fps
+    ses = run_session([3.0, 10.0])
+    lowered = with_overrides(Config(), [f"realtime.dense_fps={base / 2}"])  # ступень сервера после старта заданий
+    assert ses.jobs and all(j.fps == 0 and j.rate(lowered) == ses.stream_fps == base for j in ses.jobs)
+    assert replay_job(ses.jobs[0].record(), Config(), Roi.full()).rate(Config()) == base  # повтор: сетка из cfg
+
+
+def test_crop_pose_rejects_openvino_non_pose(monkeypatch):
+    from smokedet import realtime
+
+    monkeypatch.setattr(realtime, "is_openvino_dir", lambda path: True)
+    monkeypatch.setattr(realtime, "OvYolo", lambda path, threads: SimpleNamespace(task="detect"))
+    with pytest.raises(ValueError, match="'detect'"):
+        realtime.CropPose(Config(), "cpu")

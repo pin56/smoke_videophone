@@ -124,6 +124,11 @@ class Camera:
             self.srv.ladder.apply(self.cfg, self.target)
             self.level = self.target
 
+    def dropped_queue(self) -> int:
+        """Кадры, выброшенные из очереди источника, с текущим сегментом (читается из потока регулятора)."""
+        src = self.src  # поток камеры обнуляет self.src в конце сегмента: читать один раз
+        return self.counts["dropped_queue"] + (src.stats["dropped_queue"] if src else 0)
+
     def _priority(self, ses: RealtimeSession, t: float, last_people: float) -> int:
         gap = self.cfg.episode.merge_gap
         if any(st[2] and t - st[1] <= gap + EPS for st in ses._alerted.values()):
@@ -194,9 +199,9 @@ class Camera:
                 self.prio = self._priority(ses, a.f.t, last_people)
         finally:
             src.stop()
+            self.src = None  # до прибавления: регулятор (dropped_queue) не посчитает источник дважды
             self.counts["dropped_queue"] += src.stats["dropped_queue"]
             self.counts["decoded_frames"] += src.stats["decoded_frames"]
-            self.src = None
             self.prio = PRIO_EMPTY
         try:
             ses.finish(last_t)
@@ -221,6 +226,8 @@ def assign_clips(clips: List[ClipInput], durations: Dict[str, float], n: int) ->
 
 
 def emulated_specs(clips: List[ClipInput], durations: Dict[str, float], n: int) -> List[CameraSpec]:
+    if not clips:
+        raise ValueError("нет клипов для эмуляции камер")
     groups = assign_clips(clips, durations, min(n, len(clips)))
     specs = [CameraSpec(f"cam{i + 1:02d}", playlist=g, filler=list(g)) for i, g in enumerate(groups)]
     for i in range(len(groups), n):  # камер больше, чем клипов: только наполнитель
@@ -348,7 +355,7 @@ class Server:
             "levels": " ".join(f"{k}:{v}" for k, v in sorted(Counter(c.level for c in cams).items())),
             "prios": " ".join(f"{k}:{v}" for k, v in sorted(Counter(c.prio for c in cams).items())),
             "dropped_dense": sum(c.counts["dropped_dense"] for c in self.cams),
-            "dropped_queue": sum(c.counts["dropped_queue"] + (c.src.stats["dropped_queue"] if c.src else 0) for c in self.cams),
+            "dropped_queue": sum(c.dropped_queue() for c in self.cams),
             "alerts": len(self.alerts), "pose_batch": avg_batch("pose"), "clip_batch": avg_batch("clip"),
             "detect_per_sec": round((cur["detect"].items - prev["detect"].items) / dt, 1) if dt > 0 else "",
         }  # fmt: skip

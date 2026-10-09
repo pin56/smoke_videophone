@@ -80,10 +80,14 @@ def main(argv=None) -> int:
     cfg = load_rt_config(config, overrides)
     limit_threads(cfg.realtime.threads, cfg.realtime.ov_precision)
 
-    if args.emulate:
+    if args.emulate is not None:
+        if args.emulate < 1:
+            sys.exit("--emulate: число камер должно быть ≥ 1")
         if not args.inputs:
             sys.exit("--emulate требует --inputs")
         clips = read_inputs_csv(args.inputs)
+        if not clips:
+            sys.exit(f"{args.inputs}: нет клипов для эмуляции")
         durations = read_durations(args.durations) if args.durations else {}
         for c in clips:
             if c.clip_id not in durations:
