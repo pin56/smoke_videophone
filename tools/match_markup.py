@@ -1,6 +1,6 @@
 """Сопоставление разметки rasmetka.md с видео и предсказаниями прогонов.
 
-Запуск из корня проекта: пишет rasmetka_gt.csv и сверяет его с runs/true_now и runs/false.
+Запуск из корня проекта: читает markup/*.md, пишет markup/rasmetka_gt.csv и сверяет его с runs/true_now и runs/false.
 Импорт (tools/eval_markup.py) берёт отсюда имена файлов (canonical_stem), папку видео (FILES) и разбор времени (sec).
 
 Студенты (smoke1..17, видео — жёсткие ссылки videos/students -> videos/true|false) — в rasmetka_students.md
@@ -31,7 +31,7 @@ _FILES = {  # stem -> (папка, clip_id в runs/true_now|false)
        "распитие": "false_12"}.items()},
     **{f"smoke{i}": ("true" if i in (6, 7, 15) else "false", f"smoke{i}") for i in range(1, 18)},
 }
-MARKUP = ("rasmetka.md", "rasmetka_students.md", "rasmetka_sheets.md")
+MARKUP = ("markup/rasmetka.md", "markup/rasmetka_students.md", "markup/rasmetka_sheets.md")
 
 FILES = _FILES
 LOW = {k.lower(): k for k in _FILES}
@@ -91,7 +91,7 @@ def main():
         out.append(dict(video=stem, label=l, up=sec(t[0]), puff=sec(t[1]), down=sec(t[2]), raw=ln))
 
     bad = [o for o in out if o["video"] not in FILES]
-    with open("rasmetka_gt.csv", "w", encoding="utf-8", newline="") as f:
+    with open("markup/rasmetka_gt.csv", "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["video", "folder", "clip_id", "label", "up_sec", "puff_sec", "down_sec"])
         for o in out:

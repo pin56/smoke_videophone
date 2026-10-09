@@ -2,7 +2,7 @@
 """Оценка прогонов по разметке пользователя (rasmetka_gt.csv из tools/match_markup.py).
 
     python tools/eval_markup.py --run runs/research/base_fp16 [--run runs/research/base_fp32 ...]
-        [--gt rasmetka_gt.csv] [--out <папка отчёта>]
+        [--gt markup/rasmetka_gt.csv] [--out <папка отчёта>]
 
 Протокол — как в smokedet/evaluation.py (кейс), но только по времени: в разметке нет рамок и личности
 человека, поэтому IoU рамки не проверяется, а отметки SMOKE клипа объединяются в эпизод независимо от того,
@@ -344,7 +344,7 @@ def write_outputs(out: Path, name: str, res: dict) -> None:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", action="append", required=True, help="папка прогона run.py (можно несколько)")
-    p.add_argument("--gt", default=str(ROOT / "rasmetka_gt.csv"))
+    p.add_argument("--gt", default=str(ROOT / "markup" / "rasmetka_gt.csv"))
     p.add_argument("--out", help="папка отчёта (для одного --run; по умолчанию <run>/markup_eval)")
     p.add_argument("--gap", type=float, default=MERGE_GAP, help="объединение отметок в эпизод, с")
     a = p.parse_args(argv)

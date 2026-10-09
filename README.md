@@ -1,6 +1,6 @@
 # smokedet — детекция эпизодов, похожих на курение, по видео
 
-Кейс хакатона НТУ «Сириус» × Видеофор (Гатчина, 8–10 октября 2026). Подробный план — [PLAN.md](PLAN.md).
+Кейс хакатона НТУ «Сириус» × Видеофор (Гатчина, 8–10 октября 2026).
 
 Система **не подтверждает** факт курения и не делает выводов о личности. Она находит наблюдаемый эпизод
 поведения, похожего на курение, для тревоги оператору.
@@ -37,7 +37,8 @@
 | Интерфейс повтора анализа | `ui.py`, `smokedet/ui/` |
 | Мониторинг: стена камер, архив, проверка видео, журнал | `monitor.py`, `smokedet/monitor/`, `smokedet/ui/static/wall.*` |
 | Протокол оценки | `smokedet/evaluation.py`, `evaluate.py` |
-| Подбор порогов | `tune.py` |
+| Подбор порогов | `tools/tune.py` |
+| Ручная разметка (только время) → эталон `rasmetka_gt.csv`, `students_gt.csv` | `markup/`, `tools/match_markup.py` |
 
 ## Установка
 
@@ -353,7 +354,7 @@ python evaluate.py --pred runs/ref/predictions.csv --gt data/ref_gt.csv \
 Подбор — **только на эталонном наборе**:
 
 ```bash
-python tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
+python tools/tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
     --grid episode.confidence_threshold=0.3,0.4,0.5,0.6 --grid cycle.near_enter=0.5,0.6,0.7
 ```
 
@@ -385,7 +386,7 @@ python tools/cvat_import.py runs/cvat_done --inputs data/ref.csv --cache runs/re
 отметки (подъём руки / затяжка / опускание) и шкалой отметок внизу кадра:
 
 ```bash
-python tools/render_markup.py --cvat runs/cvat --gt rasmetka_gt.csv --videos videos/true videos/false --out runs/markup
+python tools/render_markup.py --cvat runs/cvat --gt markup/rasmetka_gt.csv --videos videos/true videos/false --out runs/markup
 ```
 
 По умолчанию — клипы с эпизодами `smoking`; `--clips 1,sm_3` — выбранные, `--all` — все, `--persons` — ещё и треки
@@ -407,7 +408,7 @@ python tools/label_server.py --data data/labeling/set1 --host 0.0.0.0 --port 876
 
 ## Фиксация результата (9 октября)
 
-1. Подобрать пороги на эталоне (`tune.py`), записать лучшие в `configs/default.yaml`.
+1. Подобрать пороги на эталоне (`tools/tune.py`), записать лучшие в `configs/default.yaml`.
 2. Закоммитить код и конфиг (в `manifest.json` попадёт коммит без `-dirty`).
 3. `python run.py --inputs data/hidden.csv --out runs/final` → сдать `manifest.json`, `predictions.csv`, архив с кодом.
 4. После фиксации порог, постобработку и предсказания не менять.

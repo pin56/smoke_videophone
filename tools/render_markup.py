@@ -5,7 +5,7 @@
 снизу — отметки rasmetka_gt.csv: подъём руки / затяжка / опускание.
 
 Запуск из корня проекта:
-    python tools/render_markup.py --cvat runs/cvat --gt rasmetka_gt.csv --videos videos/true videos/false --out runs/markup
+    python tools/render_markup.py --cvat runs/cvat --gt markup/rasmetka_gt.csv --videos videos/true videos/false --out runs/markup
 По умолчанию — клипы, где есть эпизод smoking; --clips 1,sm_3 — выбранные, --all — все. --persons рисует
 и треки всех людей (метка person).
 
@@ -263,7 +263,7 @@ def find_video(name: str, dirs: List[Path]) -> Optional[Path]:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--cvat", default="runs/cvat", help="папка с XML (CVAT for video 1.1) и index.csv экспорта")
-    ap.add_argument("--gt", default="rasmetka_gt.csv", help="отметки подъём/затяжка/опускание")
+    ap.add_argument("--gt", default="markup/rasmetka_gt.csv", help="отметки подъём/затяжка/опускание")
     ap.add_argument("--videos", nargs="+", default=["videos/true", "videos/false"], help="где искать видео")
     ap.add_argument("--out", default="runs/markup")
     ap.add_argument("--clips", default="", help="clip_id через запятую (имена XML без .xml)")

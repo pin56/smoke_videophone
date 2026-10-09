@@ -2,7 +2,7 @@
 """Перебор параметров лёгкой стадии с оценкой по разметке пользователя (rasmetka_gt.csv).
 
     python tools/tune_markup.py --inputs runs/goal/all.csv --cache runs/goal/cache \
-        [--gt rasmetka_gt.csv] [--set section.key=value ...] [--grid section.key=v1,v2 ...] [--diag] [--out <папка>]
+        [--gt markup/rasmetka_gt.csv] [--set section.key=value ...] [--grid section.key=v1,v2 ...] [--diag] [--out <папка>]
 
 Треки берутся из кэша (или считаются и кладутся в него), затем для каждой точки сетки вызывается
 Pipeline.analyze и предсказания оцениваются как в tools/eval_markup.py (только по времени, без рамок).
@@ -78,7 +78,7 @@ def debug_dict(analysis) -> dict:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--inputs", required=True, help="CSV клипов (video_path,camera_id,clip_id)")
-    p.add_argument("--gt", default=str(ROOT / "rasmetka_gt.csv"))
+    p.add_argument("--gt", default=str(ROOT / "markup" / "rasmetka_gt.csv"))
     p.add_argument("--cache", required=True, help="папка кэша треков")
     p.add_argument("--config", default=DEFAULT_CONFIG)
     p.add_argument("--set", action="append", default=[])

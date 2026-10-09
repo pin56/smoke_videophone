@@ -9,7 +9,7 @@
 или без одной камеры и оценивает его на отложенных: разница с F1 на всех клипах — оценка переобучения.
 Рекомендуемые параметры всё равно выбираются по всем клипам.
 
-    python tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
+    python tools/tune.py --inputs data/ref.csv --gt data/ref_gt.csv --out runs/tune \
         --grid episode.confidence_threshold=0.3,0.4,0.5,0.6 --grid cycle.near_enter=0.5,0.6,0.7
 
 Результаты: tune_results.csv (все точки по порядку выбора), tune_cv.csv (фолды), tune_summary.json.
@@ -20,9 +20,12 @@ import argparse
 import csv
 import json
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from smokedet.config import load_config, with_overrides
 from smokedet.evaluation import load_rows, parse_items

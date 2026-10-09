@@ -433,7 +433,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", help="extract: файл эмбеддингов (.pkl)")
     p.add_argument("--emb", help="score: файл эмбеддингов")
     p.add_argument("--grid", action="append", default=[], metavar="KEY=V1,V2")
-    p.add_argument("--gt", default=str(ROOT / "rasmetka_gt.csv"))
+    p.add_argument("--gt", default=str(ROOT / "markup" / "rasmetka_gt.csv"))
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("smokedet").setLevel(logging.WARNING)

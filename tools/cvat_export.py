@@ -2,7 +2,7 @@
 """Экспорт разметки в CVAT: треки людей из кэша трекера и эпизоды из rasmetka_gt.csv.
 
     python tools/cvat_export.py --inputs runs/goal/all.csv --cache runs/goal/cache --out runs/cvat
-        [--marks rasmetka_gt.csv] [--no-persons] [--config ...] [--set section.key=value ...]
+        [--marks markup/rasmetka_gt.csv] [--no-persons] [--config ...] [--set section.key=value ...]
 
 Детекция не перезапускается: нужен кэш треков (<cache>/<clip_id>_tracks.pkl) любого прогона run.py
 с тем же списком клипов. В --out: <clip_id>.xml («CVAT for video 1.1») на каждое видео, labels.json
@@ -32,7 +32,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Экспорт разметки в CVAT (CVAT for video 1.1)")
     p.add_argument("--inputs", required=True, help="CSV клипов, как у run.py")
     p.add_argument("--cache", required=True, help="папка кэша треков (<clip_id>_tracks.pkl)")
-    p.add_argument("--marks", default=str(ROOT / "rasmetka_gt.csv"))
+    p.add_argument("--marks", default=str(ROOT / "markup" / "rasmetka_gt.csv"))
     p.add_argument("--out", required=True)
     p.add_argument("--no-persons", action="store_true", help="без треков людей, только эпизоды")
     p.add_argument("--config", default=None)

@@ -3,7 +3,7 @@
 
     python tools/train_cycle_clf.py --inputs data/labeling/all31.csv --cache data/labeling/ref/cache \
         --labels data/labeling/ref/labels.jsonl --ref data/labeling/ref/cycles.jsonl \
-        --soft data/labeling/soft/cycles.jsonl --gt rasmetka_gt.csv --out data/training
+        --soft data/labeling/soft/cycles.jsonl --gt markup/rasmetka_gt.csv --out data/training
 
 Образцы трёх источников (колонка `source`):
   web      — циклы из выгрузки ref с меткой разметчика (smoking/not_smoking; unsure пропускаются), главные;

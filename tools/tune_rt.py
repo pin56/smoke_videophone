@@ -68,7 +68,7 @@ def main(argv=None) -> int:
     p.add_argument("--grid", action="append", default=[], metavar="SECTION.KEY=V1,V2")
     p.add_argument("--objects", action=argparse.BooleanOptionalAction, default=None,
                    help="стадия 4 (CLIP) при повторе (по умолчанию — realtime.objects из конфига)")
-    p.add_argument("--gt", default=str(ROOT / "rasmetka_gt.csv"))
+    p.add_argument("--gt", default=str(ROOT / "markup" / "rasmetka_gt.csv"))
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
