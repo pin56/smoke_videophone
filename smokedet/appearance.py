@@ -108,17 +108,22 @@ def weights_path(model: str, weights_dir: str) -> str:
     return str(Path(weights_dir) / Path(url).name) if url else model
 
 
-OPEN_CLIP = "oc:"  # appearance.model «oc:<архитектура>/<тег>» — модель open_clip (MobileCLIP2, SigLIP2), иначе OpenAI CLIP
+OPEN_CLIP = "oc:"  # appearance.model «oc:<архитектура>/<тег>» — open_clip (MobileCLIP2, SigLIP2), иначе OpenAI CLIP
 
 
-def load_clip(model: str, device: str, weights_dir: str):
+def load_clip(model: str, device: str, weights_dir: str, px: int = 0):
     """CLIP по appearance.model -> (модель, предобработка PIL, токенизатор, файл весов). Веса open_clip скачиваются
-    в weights_dir; ветви MobileOne/FastViT у MobileCLIP сливаются (timm reparameterize_model): быстрее, ответ тот же."""
+    в weights_dir; ветви MobileOne/FastViT у MobileCLIP сливаются (timm reparameterize_model): быстрее, ответ тот же.
+    px > 0 — вход ViT OpenAI CLIP px x px (resize_vit)."""
     if not model.startswith(OPEN_CLIP):
         import clip
 
         m, pre = clip.load(model, device=device, download_root=weights_dir)
+        if px and px != m.visual.input_resolution:
+            m, pre = resize_vit(m, px), clip.clip._transform(px)
         return m, pre, clip.tokenize, weights_path(model, weights_dir)
+    if px:
+        raise ValueError("appearance.input_px — только для OpenAI CLIP")
     import open_clip
     from open_clip.pretrained import download_pretrained, get_pretrained_cfg
     from timm.utils import reparameterize_model
@@ -126,21 +131,43 @@ def load_clip(model: str, device: str, weights_dir: str):
     arch, tag = model[len(OPEN_CLIP):].split("/", 1)
     m, _, pre = open_clip.create_model_and_transforms(arch, pretrained=tag, cache_dir=weights_dir, device=device)
     m = reparameterize_model(m.eval())
-    return m, pre, open_clip.get_tokenizer(arch), str(download_pretrained(get_pretrained_cfg(arch, tag), cache_dir=weights_dir))
+    weights = str(download_pretrained(get_pretrained_cfg(arch, tag), cache_dir=weights_dir))
+    return m, pre, open_clip.get_tokenizer(arch), weights
 
 
-def openvino_path(weights: str) -> str:
-    """IR визуальной части CLIP (tools/prepare_weights.py) рядом с файлом весов: weights/<файл>-visual_openvino."""
+def resize_vit(model, px: int):
+    """ViT OpenAI CLIP на вход px x px: позиционные векторы сетки патчей интерполируются бикубически. Кропы рта на
+    CCTV — десятки пикселей, родной вход их только растягивает, а цена ViT растёт с числом патчей."""
+    import torch
+
+    v = model.visual
+    patch = v.conv1.kernel_size[0]
+    if px % patch:
+        raise ValueError(f"appearance.input_px={px} не кратно патчу {patch}")
+    pe = v.positional_embedding.data
+    g0, g1 = int(round((pe.shape[0] - 1) ** 0.5)), px // patch
+    grid = pe[1:].float().reshape(1, g0, g0, -1).permute(0, 3, 1, 2)
+    grid = torch.nn.functional.interpolate(grid, size=(g1, g1), mode="bicubic", align_corners=False)
+    grid = grid.permute(0, 2, 3, 1).reshape(g1 * g1, -1).to(pe.dtype)
+    v.positional_embedding = torch.nn.Parameter(torch.cat([pe[:1], grid]))
+    v.input_resolution = px
+    return model
+
+
+def openvino_path(weights: str, px: int = 0) -> str:
+    """IR визуальной части CLIP (tools/prepare_weights.py) рядом с файлом весов: weights/<файл>-visual_openvino
+    (при appearance.input_px — <файл>-visual<px>_openvino)."""
     p = Path(weights)
-    return str(p.with_name(p.stem + "-visual_openvino") / "model.xml")
+    return str(p.with_name(f"{p.stem}-visual{px or ''}_openvino") / "model.xml")
 
 
-def export_openvino(model, weights: str, res: int) -> str:
-    """Визуальная часть модели load_clip (вход res x res) -> IR OpenVINO (веса f32, батч любой); путь к model.xml."""
+def export_openvino(model, weights: str, res: int, px: int = 0) -> str:
+    """Визуальная часть модели load_clip (вход res x res; px — appearance.input_px) -> IR OpenVINO (веса f32, батч
+    любой); путь к model.xml."""
     import openvino as ov
     import torch
 
-    out = openvino_path(weights)
+    out = openvino_path(weights, px)
     if not Path(out).exists():
         visual, r = model.visual.float().eval(), res
         ov.save_model(ov.convert_model(visual, example_input=torch.zeros(1, 3, r, r), input=[(-1, 3, r, r)]), out,
@@ -198,11 +225,12 @@ class ClipEncoder:
 
         self.torch, self.Image = torch, Image
         self.device = f"cuda:{device}" if device.isdigit() else device
-        self.model, self.preprocess, tokenize, self.weights = load_clip(cfg.model, self.device, weights_dir)
+        self.px = cfg.input_px
+        self.model, self.preprocess, tokenize, self.weights = load_clip(cfg.model, self.device, weights_dir, self.px)
         self.model.eval()
         self.res = int(self.preprocess(Image.new("RGB", (8, 8))).shape[-1])
         self.visual = None
-        ir = openvino_path(self.weights)
+        ir = openvino_path(self.weights, self.px)
         if self.device == "cpu" and cfg.openvino:
             if Path(ir).exists():
                 import openvino as ov
@@ -274,7 +302,8 @@ class AppearanceScorer:
 
     @staticmethod
     def _key(clip_id: str, c: Cycle, cfg: AppearanceConfig, digest: str) -> tuple:
-        params = (cfg.model, cfg.max_frames, cfg.mouth_scale, cfg.wide_scale, cfg.tight_scale, cfg.frame_agg)
+        params = (cfg.model, cfg.input_px, cfg.max_frames, cfg.mouth_scale, cfg.wide_scale, cfg.tight_scale,
+                  cfg.frame_agg)  # fmt: skip
         return clip_id, digest, c.track_id, round(c.start, 3), round(c.hold_start, 3), round(c.hold_end, 3), params
 
     def score(

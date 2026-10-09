@@ -62,7 +62,7 @@ def main(argv=None) -> int:
     enc = ClipEncoder(cfg.appearance, "cpu", project_path(cfg.appearance.weights_dir))  # скачивает недостающие веса
     print(f"CLIP внешнего вида {cfg.appearance.model}: {file_sha256(enc.weights)}")
     if cfg.appearance.openvino:
-        print(f"CLIP для CPU (OpenVINO): {export_openvino(enc.model, enc.weights, enc.res)}")
+        print(f"CLIP для CPU (OpenVINO): {export_openvino(enc.model, enc.weights, enc.res, enc.px)}")
     return 0
 
 

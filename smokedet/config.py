@@ -152,6 +152,7 @@ class AppearanceConfig:
 
     enabled: bool = True
     model: str = "ViT-L/14@336px"  # CLIP (OpenAI); файл весов — в weights_dir
+    input_px: int = 0  # > 0: вход ViT OpenAI CLIP px x px (кратно патчу), позиции сетки интерполируются; 0 — родной
     weights_dir: str = "weights"
     openvino: bool = True  # на CPU визуальная часть через OpenVINO (weights/<файл весов>-visual_openvino, prepare_weights)
     max_frames: int = 8  # кадров паузы на цикл

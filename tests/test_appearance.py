@@ -1,4 +1,6 @@
 """Оценка внешнего вида цикла (appearance.py) без CLIP: кодировщик подменён оценкой по яркости кропа."""
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from test_logic import make_signal, puffs
@@ -135,3 +137,19 @@ def test_scorer_without_model_keeps_cycles(monkeypatch, tmp_path):
     assert cycles[0].valid and np.isnan(cycles[0].appearance)
     info = scorer.describe(AppearanceConfig())
     assert not info["available"] and "нет весов" in info["error"]
+
+
+def test_resize_vit_interpolates_positions():
+    import torch
+
+    v = SimpleNamespace(conv1=torch.nn.Conv2d(3, 8, 14, 14), input_resolution=224)
+    grid = torch.arange(16.0).repeat(16, 1)  # позиция растёт слева направо
+    v.positional_embedding = torch.nn.Parameter(torch.cat([torch.full((1, 8), -1.0), grid.reshape(256, 1).repeat(1, 8)]))
+    appearance.resize_vit(SimpleNamespace(visual=v), 168)
+    pe = v.positional_embedding.data
+    assert pe.shape == (1 + 12 * 12, 8) and v.input_resolution == 168
+    assert torch.equal(pe[0], torch.full((8,), -1.0))  # вектор класса не трогается
+    row = pe[1:13, 0]
+    assert bool((row[1:] > row[:-1]).all())  # порядок позиций сохранён
+    with pytest.raises(ValueError):
+        appearance.resize_vit(SimpleNamespace(visual=v), 150)

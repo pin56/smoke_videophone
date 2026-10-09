@@ -94,7 +94,7 @@ def extract(a) -> int:
     acfg.model = a.model
     enc = ap.ClipEncoder(acfg, a.device, project_path(acfg.weights_dir))
     if a.device == "cpu" and acfg.openvino and enc.visual is None:
-        ap.export_openvino(enc.model, enc.weights, enc.res)
+        ap.export_openvino(enc.model, enc.weights, enc.res, enc.px)
         enc = ap.ClipEncoder(acfg, a.device, project_path(acfg.weights_dir))
     scales = [float(s) for s in a.views.split(",")]
     recs, t0, n_crops = {}, time.perf_counter(), 0
