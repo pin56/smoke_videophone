@@ -108,21 +108,41 @@ def weights_path(model: str, weights_dir: str) -> str:
     return str(Path(weights_dir) / Path(url).name) if url else model
 
 
+OPEN_CLIP = "oc:"  # appearance.model «oc:<архитектура>/<тег>» — модель open_clip (MobileCLIP2, SigLIP2), иначе OpenAI CLIP
+
+
+def load_clip(model: str, device: str, weights_dir: str):
+    """CLIP по appearance.model -> (модель, предобработка PIL, токенизатор, файл весов). Веса open_clip скачиваются
+    в weights_dir; ветви MobileOne/FastViT у MobileCLIP сливаются (timm reparameterize_model): быстрее, ответ тот же."""
+    if not model.startswith(OPEN_CLIP):
+        import clip
+
+        m, pre = clip.load(model, device=device, download_root=weights_dir)
+        return m, pre, clip.tokenize, weights_path(model, weights_dir)
+    import open_clip
+    from open_clip.pretrained import download_pretrained, get_pretrained_cfg
+    from timm.utils import reparameterize_model
+
+    arch, tag = model[len(OPEN_CLIP):].split("/", 1)
+    m, _, pre = open_clip.create_model_and_transforms(arch, pretrained=tag, cache_dir=weights_dir, device=device)
+    m = reparameterize_model(m.eval())
+    return m, pre, open_clip.get_tokenizer(arch), str(download_pretrained(get_pretrained_cfg(arch, tag), cache_dir=weights_dir))
+
+
 def openvino_path(weights: str) -> str:
     """IR визуальной части CLIP (tools/prepare_weights.py) рядом с файлом весов: weights/<файл>-visual_openvino."""
     p = Path(weights)
     return str(p.with_name(p.stem + "-visual_openvino") / "model.xml")
 
 
-def export_openvino(model, weights: str) -> str:
-    """Визуальная часть загруженной clip.load модели -> IR OpenVINO (веса f32, батч любой); путь к model.xml."""
+def export_openvino(model, weights: str, res: int) -> str:
+    """Визуальная часть модели load_clip (вход res x res) -> IR OpenVINO (веса f32, батч любой); путь к model.xml."""
     import openvino as ov
     import torch
 
     out = openvino_path(weights)
     if not Path(out).exists():
-        visual = model.visual.float().eval()
-        r = visual.input_resolution
+        visual, r = model.visual.float().eval(), res
         ov.save_model(ov.convert_model(visual, example_input=torch.zeros(1, 3, r, r), input=[(-1, 3, r, r)]), out,
                       compress_to_fp16=False)  # fmt: skip
     return out
@@ -173,15 +193,14 @@ class ClipEncoder:
     в bf16): CLIP-L/336 ~100 мс на кроп против ~650 у torch, косинус векторов с torch >= 0.998."""
 
     def __init__(self, cfg: AppearanceConfig, device: str, weights_dir: str):
-        import clip
         import torch
         from PIL import Image
 
         self.torch, self.Image = torch, Image
         self.device = f"cuda:{device}" if device.isdigit() else device
-        self.weights = weights_path(cfg.model, weights_dir)
-        self.model, self.preprocess = clip.load(cfg.model, device=self.device, download_root=weights_dir)
+        self.model, self.preprocess, tokenize, self.weights = load_clip(cfg.model, self.device, weights_dir)
         self.model.eval()
+        self.res = int(self.preprocess(Image.new("RGB", (8, 8))).shape[-1])
         self.visual = None
         ir = openvino_path(self.weights)
         if self.device == "cpu" and cfg.openvino:
@@ -194,7 +213,7 @@ class ClipEncoder:
         self.npos, self.text = [], []
         with torch.no_grad():
             for pos, neg in (MOUTH_PROMPTS, WIDE_PROMPTS):
-                t = self.model.encode_text(clip.tokenize(pos + neg).to(self.device)).float()
+                t = self.model.encode_text(tokenize(pos + neg).to(self.device)).float()
                 self.text.append(t / t.norm(dim=-1, keepdim=True))
                 self.npos.append(len(pos))
         self.scale = float(self.model.logit_scale.detach().exp())

@@ -94,7 +94,7 @@ def extract(a) -> int:
     acfg.model = a.model
     enc = ap.ClipEncoder(acfg, a.device, project_path(acfg.weights_dir))
     if a.device == "cpu" and acfg.openvino and enc.visual is None:
-        ap.export_openvino(enc.model, enc.weights)
+        ap.export_openvino(enc.model, enc.weights, enc.res)
         enc = ap.ClipEncoder(acfg, a.device, project_path(acfg.weights_dir))
     scales = [float(s) for s in a.views.split(",")]
     recs, t0, n_crops = {}, time.perf_counter(), 0
@@ -140,14 +140,14 @@ def extract(a) -> int:
                     ok = [j2 for j2 in range(len(ks)) if crops[i][j2] is not None]
                     if ok:
                         flat = [crops[i][j2][v] for j2 in ok for v in range(len(scales))]
-                        e = enc.embed(flat).numpy().reshape(len(ok), len(scales), -1).astype(np.float16)
+                        e = enc.embed(flat).cpu().numpy().reshape(len(ok), len(scales), -1).astype(np.float16)
                         n_crops += len(flat)
                         ks_ok = ks[ok]
                         rec = {"t": sig.t[ks_ok].astype(np.float32), "d": sig.d[ks_ok].astype(np.float32), "emb": e}
                         rok = [j2 for j2 in range(len(rests[i])) if rcrops[i][j2] is not None]
                         if rok:
                             flat = [rcrops[i][j2][v] for j2 in rok for v in range(len(REST_VIEWS))]
-                            rec["rest"] = enc.embed(flat).numpy().reshape(len(rok), len(REST_VIEWS), -1).astype(np.float16)
+                            rec["rest"] = enc.embed(flat).cpu().numpy().reshape(len(rok), len(REST_VIEWS), -1).astype(np.float16)
                             rec["rest_t"] = sig.t[rests[i][rok]].astype(np.float32)
                             n_crops += len(flat)
                         recs[cycle_key(clip.clip_id, c)] = rec
@@ -198,16 +198,15 @@ class TextBank:
     """Векторы описаний всех словарей PROMPT_SETS: «mouth» для узких видов, «wide» для широкого, «hand» для кисти."""
 
     def __init__(self, model: str, weights_dir: str):
-        import clip
         import torch
 
-        m, _ = clip.load(model, device="cpu", download_root=weights_dir)
+        m, _, tokenize, _ = ap.load_clip(model, "cpu", weights_dir)
         self.scale = float(m.logit_scale.detach().exp())
         self.sets = {}
         with torch.no_grad():
             for pset, views in PROMPT_SETS.items():
                 for name, (pos, neg) in views.items():
-                    t = m.encode_text(clip.tokenize(list(pos) + list(neg))).float()
+                    t = m.encode_text(tokenize(list(pos) + list(neg))).float()
                     self.sets[pset, name] = ((t / t.norm(dim=-1, keepdim=True)).numpy(), len(pos))
 
     def frame_scores(self, emb: np.ndarray, names, pset: str = "base") -> np.ndarray:
