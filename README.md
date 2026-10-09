@@ -210,6 +210,38 @@ python tools/eval_markup.py --run runs/rt/final
 `near_enter` 0.8, фильтры позы) снижает FP, но теряет 2–13 true-клипов. `many_cycles` 4 даёт F1 0.51, но снимает
 события самих курящих в клипах 4 и sm_y_2 (4 цикла, CLIP 1.2 и 3.9): TP там держится только за счёт события соседа.
 
+### На CPU (OpenVINO)
+
+Детектор и поза — IR OpenVINO (`*_openvino_model`, прямой путь `smokedet/ov_yolo.py`), CLIP — IR из
+`tools/prepare_weights.py`. Рекомендуемый профиль — CLIP ViT-L/14 с входом 168 px (`appearance.input_px`:
+позиционные эмбеддинги ViT интерполируются, кропы «рот + кисть» мелкие, 336 px им не нужен):
+
+```bash
+python run_rt.py --inputs runs/rt/all.csv --out runs/cpu/l168 --device cpu \
+    --set realtime.det_model=weights/yolo11n_openvino_model --set realtime.pose_model=weights/yolo11m-pose_openvino_model \
+    --set realtime.skip_confirmed=true --set appearance.model=ViT-L/14 --set appearance.input_px=168 \
+    --set appearance.tight_scale=0.2 --set appearance.frame_agg=top2 \
+    --set appearance.direct_score=9 --set appearance.rescue_score=9 --set appearance.min_score=0
+```
+
+Перед первым запуском с новым `input_px` — `tools/prepare_weights.py` с теми же `--set` (экспорт IR CLIP).
+Перебор порогов CLIP без пересчёта CLIP — `tools/clip_lab.py` (эмбеддинги всех кадров пауз в банк, затем `score`).
+
+Результат на тех же 34 клипах, Ryzen 7 9800X3D (Zen 5, bf16), весь процессор на один клип; «затяжек» — отметки
+затяжек разметки внутри событий, «время» — доля времени эпизодов под событиями:
+
+| вариант | F1 | true | затяжек | время | FP в false | load: среднее / худший |
+|---|---|---|---|---|---|---|
+| CLIP L/14@336 | 0.472 | 19/19 | 64/80 | 83 % | 18 | 0.37 / 1.30 |
+| L/14@224, `skip_confirmed`, `tight_scale` 0.2, top2 | 0.472 | 19/19 | 64/80 | 83 % | 17 | 0.28 / 0.94 |
+| то же + разрез длинной паузы (`cycle.split_*`) | 0.455 | 19/19 | 77/80 | 97 % | 20 | 0.30 / 1.00 |
+| **L/14@168, пороги CLIP 9/9/0 (команда выше)** | **0.472** | **19/19** | **77/80** | **93 %** | **19** | **0.22 / 0.72** |
+
+CLIP L/14 на CPU: 43.6 мс на кроп при 224 px, 24.6 — при 168, 16.9 — при 140 (140 px — 18/19 при `min_score` 0).
+Хуже по качеству при той же цене: ViT-B/32, B/16, MobileCLIP2-S2/S4/B и SigLIP2-B/16 (`appearance.model=oc:…`,
+open_clip), INT8 позы. Разрез паузы добавляет FP только в false-клипе с имитацией курения палочкой. На дешёвом
+боксе класса N100 (4 потока, AVX2, без bf16, эмуляция `--cpus`) профиль L/14@224 даёт load 3–5.7 — не реальное время.
+
 ## Выход (`--out`)
 
 | Файл | Содержимое |

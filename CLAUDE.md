@@ -24,7 +24,8 @@
 .venv/bin/python run.py --input videos/1.mp4 --camera-id cam1 --out runs/x --render   # один клип
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final [--workers 2]   # набор (CSV: video_path,camera_id[,clip_id,start_time,roi])
 .venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final [--no-objects]   # потоковый режим
-.venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/cpu --device cpu --set realtime.det_model=weights/yolo11n_openvino_model --set realtime.pose_model=weights/yolo11m-pose_openvino_model   # на CPU через OpenVINO
+.venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/cpu --device cpu --set realtime.det_model=weights/yolo11n_openvino_model --set realtime.pose_model=weights/yolo11m-pose_openvino_model   # на CPU через OpenVINO (профиль CLIP 168 px — README, «На CPU»)
+.venv/bin/python tools/clip_lab.py score --inputs runs/rt/all.csv --cache runs/cpu/cache --emb runs/clip_lab/L168.pkl --grid lab.views=0+1+2 --grid lab.agg=top2 --grid appearance.min_score=0,1   # пороги CLIP по банку эмбеддингов (банк — clip_lab.py extract)
 .venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5
 .venv/bin/python ui.py --inputs data/demo.csv --out runs/final        # веб-интерфейс повтора на 127.0.0.1:8765
 .venv/bin/python ui.py --videos videos --out runs/ui                  # то же по папке, анализ при открытии клипа
@@ -81,6 +82,10 @@
 NMS в numpy, без `predict()` ultralytics); CLIP внешнего вида на CPU — IR из `prepare_weights` (`appearance.openvino`).
 OpenVINO на CPU с BF16 (Zen 4/5, Xeon) считает в bf16 — события чуть отличаются от torch. Бюджет ядер — `--cpus` и
 `realtime.threads` (в `RULE_FIELDS`), `cpu_cores` в логе — процессорное время / длительность.
+`appearance.input_px` — вход ViT OpenAI CLIP меньше родного (`appearance.resize_vit`), IR на каждый px свой;
+`appearance.model=oc:<арх>/<тег>` — модели open_clip. `ClipEncoder` грузится один раз за процесс: `model`/`input_px`
+в одной сетке `tune_rt.py`/`clip_lab.py` не перебирать — отдельные запуски. `clip_lab score` требует те же `--set`
+`realtime.*`, что прогон кэша (ключ кэша), ключи `lab.*` — только через `--grid`.
 
 ## Неочевидные моменты
 
