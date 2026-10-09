@@ -7,6 +7,7 @@ xywh→xyxy, жадный NMS как torchvision.ops.nms, не больше max_
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import List, Tuple
 
@@ -14,6 +15,36 @@ import numpy as np
 import yaml
 
 MAX_DET = 300  # как max_det в ultralytics
+# > 0 — сервер на много камер (smokedet/serve): модели компилируются на столько параллельных потоков исполнения
+# (NUM_STREAMS), каждый поток вызывающего — со своим запросом; 0 — один поток на все ядра (LATENCY), как run_rt.py
+STREAMS = 0
+
+
+def cpu_config(threads: int = 0) -> dict:
+    """Конфиг compile_model на CPU: см. STREAMS; threads — INFERENCE_NUM_THREADS."""
+    config = {"PERFORMANCE_HINT": "THROUGHPUT", "NUM_STREAMS": str(STREAMS)} if STREAMS > 0 else {"PERFORMANCE_HINT": "LATENCY"}
+    if threads > 0:
+        config["INFERENCE_NUM_THREADS"] = threads
+    return config
+
+
+class ThreadRequests:
+    """Infer request на поток вызывающего: один запрос OpenVINO из нескольких потоков сразу вызывать нельзя."""
+
+    def __init__(self, compiled):
+        self.compiled = compiled
+        self._local = threading.local()
+
+    def get(self):
+        req = getattr(self._local, "req", None)
+        if req is None:
+            req = self._local.req = self.compiled.create_infer_request()
+        return req
+
+    def infer(self, x: np.ndarray) -> np.ndarray:
+        req = self.get()
+        req.infer({0: x})
+        return req.get_output_tensor(0).data.copy()
 
 
 def is_openvino_dir(path: str) -> bool:
@@ -71,16 +102,12 @@ class OvYolo:
         ppp.input().tensor().set_element_type(ov.Type.u8).set_layout(ov.Layout("NHWC")).set_color_format(ColorFormat.BGR)
         ppp.input().preprocess().convert_element_type(ov.Type.f32).convert_color(ColorFormat.RGB).scale(255.0)
         ppp.input().model().set_layout(ov.Layout("NCHW"))
-        config = {"PERFORMANCE_HINT": "LATENCY"}
-        if threads > 0:
-            config["INFERENCE_NUM_THREADS"] = threads
-        self.compiled = core.compile_model(ppp.build(), "CPU", config)
-        self.request = self.compiled.create_infer_request()
+        self.compiled = core.compile_model(ppp.build(), "CPU", cpu_config(threads))
+        self.requests = ThreadRequests(self.compiled)
 
     def __call__(self, batch: np.ndarray) -> np.ndarray:
         """(B, H, W, 3) uint8 BGR -> выход головы (B, 4 + nc + доп. каналы, N)."""
-        self.request.infer({0: np.ascontiguousarray(batch)})
-        return self.request.get_output_tensor(0).data.copy()
+        return self.requests.infer(np.ascontiguousarray(batch))
 
     def detect(self, batch: np.ndarray, conf: float, iou: float, cls: int = 0) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """Рамки, уверенность и доп. каналы (у позы — точки (K, 17, 3)) класса cls в координатах входа."""
