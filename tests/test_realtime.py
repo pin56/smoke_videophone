@@ -369,3 +369,50 @@ def test_fix_frame_count_webm():
     old = SimpleNamespace(meta=VideoMeta("x.mp4", 25.0, 250, 640, 480), stats={})
     fix_frame_count(old)
     assert old.meta.frame_count == 250
+
+
+class FakeModels:
+    """Детектор и поза без сетей: один человек в BOX, кисть по puff_alpha; время кадра записано в сам кадр."""
+
+    def __init__(self, starts):
+        self.starts = starts
+
+    def detect(self, frame):
+        return np.array([BOX]), np.array([0.9])
+
+    def pose(self, items):
+        return [(BOX.copy(), pose(puff_alpha(float(fr[0, 0, 0]), self.starts)), 0.9) for fr, _ in items]
+
+
+def run_session(starts, total=30.0, job_fps=None):
+    cfg = with_overrides(Config(), [])
+    ses = RealtimeSession(FakeModels(starts), cfg, SimpleNamespace(), Roi.full())
+    if job_fps is not None:
+        ses.rc.dense_fps = job_fps  # как регулятор сервера: сетка потока прежняя, новые задания — реже
+    sparse, dense = Ticker(1.0), Ticker(1.0 / ses.stream_fps)
+    for i in range(int(total * 25)):
+        t = i / 25
+        d, s = dense(t), sparse(t)
+        if d or s:
+            ses.step(StreamFrame(i, t, np.full((2, 2, 3), t), s))
+    ses.finish(t)
+    return ses
+
+
+def test_job_fps_subsamples_dense_frames():
+    starts = [3.0, 10.0]
+    full, half = run_session(starts), run_session(starts, job_fps=2.5)
+    assert full.jobs and all(j.fps == 0 for j in full.jobs)
+    assert all(j.fps == 2.5 for j in half.jobs)
+    gaps = np.diff([o.t for o in full.jobs[0].obs])
+    assert np.allclose(gaps, 0.2)  # каждый кадр плотной сетки
+    n_full, n_half = sum(len(j.obs) for j in full.jobs), sum(len(j.obs) for j in half.jobs)
+    assert n_half < 0.75 * n_full  # отсчёты 1 Гц берутся всегда
+    dense_t = [o.t for j in half.jobs for o in j.obs if abs(o.t - round(o.t)) > 1e-6]
+    assert np.allclose(np.array(dense_t) / 0.4, np.round(np.array(dense_t) / 0.4))  # сетка 2.5 кадра/с
+    assert len(person_cycles(full.jobs)[1]) == len(person_cycles(half.jobs)[1]) == 2
+    cfg = Config()
+    for ses in (full, half):  # повтор из кэша — те же циклы и та же частота сигнала
+        rep = [replay_job(j.record(), cfg, Roi.full()) for j in ses.jobs]
+        assert [j.fps for j in rep] == [j.fps for j in ses.jobs]
+        assert [(c.start, c.end) for j in rep for c in j.cycles] == [(c.start, c.end) for j in ses.jobs for c in j.cycles]

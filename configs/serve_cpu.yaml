@@ -1,0 +1,31 @@
+# Сервер без GPU (EPYC и т. п.): профиль README «На CPU» — детектор и поза OpenVINO, CLIP L/14@168 IR.
+# serve.py --mode cpu; поверх configs/default.yaml (не указанные здесь поля — умолчания).
+detector:
+  device: cpu
+realtime:
+  det_model: weights/yolo11n_openvino_model
+  pose_model: weights/yolo11m-pose_openvino_model
+  skip_confirmed: true      # CLIP новых циклов уже подтверждённого события не считается (на эталоне без потерь)
+  many_median: 3.5          # долгое курение, где сигарета видна средне (студенты: F1 0.460 → 0.489, затяжки 71 → 152 из 302)
+  rule_overrides:           # как в configs/default.yaml, но appearance.min_score 0 (пороги CLIP 9/9/0 под вход 168 px)
+    - episode.min_cycles=1
+    - episode.confidence_threshold=0.1
+    - cycle.min_hold=0.2
+    - cycle.max_hold=8
+    - cycle.near_enter=1.2
+    - cycle.near_exit=1.5
+    - cycle.split_enter=0.6
+    - cycle.split_exit=0.9
+    - cycle.phone_ear_ratio=0
+    - cycle.min_wrist_above_elbow=0
+    - cycle.max_wrist_above_mouth=10
+    - cycle.max_elbow_raise=10
+    - cycle.min_face_visible=0
+    - appearance.min_score=0
+appearance:
+  model: ViT-L/14           # вход 168 px: позиции ViT интерполируются, кропы «рот + кисть» мелкие (README, «На CPU»)
+  input_px: 168
+  tight_scale: 0.2
+  frame_agg: top2
+  direct_score: 9
+  rescue_score: 9

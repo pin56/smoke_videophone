@@ -235,7 +235,9 @@ class ClipEncoder:
             if Path(ir).exists():
                 import openvino as ov
 
-                self.visual = ov.Core().compile_model(ir, "CPU", {"PERFORMANCE_HINT": "LATENCY"})
+                from .ov_yolo import ThreadRequests, cpu_config
+
+                self.visual = ThreadRequests(ov.Core().compile_model(ir, "CPU", cpu_config()))
             else:
                 log.warning("нет %s (tools/prepare_weights.py): CLIP на CPU через torch, в несколько раз медленнее", ir)
         self.npos, self.text = [], []
@@ -252,7 +254,7 @@ class ClipEncoder:
         x = torch.stack([self.preprocess(self.Image.fromarray(np.ascontiguousarray(c[:, :, ::-1]))) for c in crops])
         with torch.no_grad():
             if self.visual is not None:
-                e = torch.from_numpy(self.visual(x.numpy())[0]).float()
+                e = torch.from_numpy(self.visual.infer(x.numpy())).float()
             else:
                 e = self.model.encode_image(x.to(self.device)).float()
         return e / e.norm(dim=-1, keepdim=True)

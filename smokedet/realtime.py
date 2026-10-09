@@ -264,8 +264,11 @@ class PersonJob:
     так же, как поток. Число отсчётов нужно, потому что после повторного открытия задания бэкфилл из кольцевого
     буфера дописывает отсчёты с временем раньше прошлого шага: по времени повтор отдал бы их не тому шагу."""
 
-    def __init__(self, tid: int, box: np.ndarray, until: float, t0: float = 0.0):
+    def __init__(self, tid: int, box: np.ndarray, until: float, t0: float = 0.0, fps: float = 0.0):
         self.tid = tid
+        # частота отсчётов плотной проверки (сервер снижает её под нагрузкой); 0 — каждый кадр плотной сетки потока
+        self.fps = fps
+        self._tick = Ticker(1.0 / fps) if fps > 0 else None
         self.t0 = t0  # начало потока: пауза в первые cycle.lookaround с не отбрасывается за no_approach
         self.box = np.asarray(box, dtype=np.float64).copy()  # рамка человека для кропа следующего кадра
         self.until = until  # после этого момента без новых срабатываний триггера задание закрывается
@@ -281,8 +284,18 @@ class PersonJob:
     def last_t(self) -> float:
         return self.obs[-1].t if self.obs else -math.inf
 
+    def rate(self, cfg: Config) -> float:
+        return self.fps if self.fps > 0 else cfg.realtime.dense_fps
+
+    def wants(self, t: float) -> bool:
+        """Брать ли кадр плотной сетки t (вызывается по кадрам в порядке времени): при своей частоте задания —
+        первый кадр каждого интервала её сетки."""
+        return self._tick is None or self._tick(t)
+
     def add(self, o: PersonObs) -> None:
         self.obs.append(o)
+        if self._tick is not None:
+            self._tick(o.t)  # отсчёт кадра 1 Гц занимает свой интервал сетки задания
         self.box = o.box.astype(np.float64).copy()
 
     def predict_box(self, t: float, window: float) -> np.ndarray:
@@ -312,7 +325,7 @@ class PersonJob:
         obs = [o for o in self.obs if o.t >= start - EPS]
         if len(obs) < 3:
             return [], None
-        sig = build_signal(self.tid, obs, roi, cfg.geometry, cfg.tracking, cfg.realtime.dense_fps)
+        sig = build_signal(self.tid, obs, roi, cfg.geometry, cfg.tracking, self.rate(cfg))
         new = []
         for c in detect_cycles(sig, cfg.cycle):
             if c.hold_start <= self._last_hold_end + EPS:
@@ -339,12 +352,16 @@ class PersonJob:
 
     def record(self) -> dict:
         """Для кэша: только то, что нужно для повтора."""
-        return {"tid": self.tid, "obs": self.obs, "ticks": self.ticks, "t0": self.t0}
+        rec = {"tid": self.tid, "obs": self.obs, "ticks": self.ticks, "t0": self.t0}
+        if self.fps > 0:
+            rec["fps"] = self.fps
+        return rec
 
 
 def replay_job(rec: dict, cfg: Config, roi: Roi) -> PersonJob:
     """Повтор задания из кэша: те же отсчёты и шаги фиксации, что в потоке."""
-    job = PersonJob(rec["tid"], rec["obs"][0].box if rec["obs"] else np.zeros(4), 0.0, rec.get("t0", 0.0))
+    job = PersonJob(rec["tid"], rec["obs"][0].box if rec["obs"] else np.zeros(4), 0.0, rec.get("t0", 0.0),
+                    rec.get("fps", 0.0))
     obs, i = rec["obs"], 0
     for tick in rec["ticks"]:
         now, final = tick[0], tick[1]
@@ -363,14 +380,16 @@ def replay_job(rec: dict, cfg: Config, roi: Roi) -> PersonJob:
 def person_signals(jobs: List[PersonJob], cfg: Config, roi: Roi) -> Dict[int, TrackSignal]:
     """Сигнал человека по отсчётам всех его заданий (для рамки события и стадии 4 при повторе)."""
     by_tid: Dict[int, Dict[int, PersonObs]] = defaultdict(dict)
+    rate: Dict[int, float] = {}
     for job in jobs:
+        rate[job.tid] = min(rate.get(job.tid, math.inf), job.rate(cfg))
         for o in job.obs:
             by_tid[job.tid][o.frame_idx] = o
     out = {}
     for tid, d in by_tid.items():
         obs = [d[k] for k in sorted(d)]
         if len(obs) >= 3:
-            out[tid] = build_signal(tid, obs, roi, cfg.geometry, cfg.tracking, cfg.realtime.dense_fps)
+            out[tid] = build_signal(tid, obs, roi, cfg.geometry, cfg.tracking, rate[tid])
     return out
 
 
@@ -730,6 +749,7 @@ class RealtimeSession:
         self.tm = dict.fromkeys(STAGES, 0.0)
         self.alerts: List[dict] = []
         self.t0: Optional[float] = None  # время первого кадра потока
+        self.stream_fps = self.rc.dense_fps  # частота плотной сетки потока (сервер меняет rc.dense_fps на лету)
         self._alerted: Dict[int, AlertState] = {}  # человек -> последнее событие, о котором сообщено (alert_change)
 
     # -- вспомогательное
@@ -765,7 +785,9 @@ class RealtimeSession:
         self.ring.push(f)
 
     def _dense_step(self, f: StreamFrame) -> None:
-        jobs = list(self.active.values())
+        jobs = [j for j in self.active.values() if j.wants(f.t)]
+        if not jobs:
+            return
         res = self._pose([(f.frame, j.predict_box(f.t, self.rc.motion_window)) for j in jobs], "pose_dense")
         self.stats["dense_frames"] += 1
         for job, r in zip(jobs, res):
@@ -866,7 +888,8 @@ class RealtimeSession:
                 job.until = f.t + (1.0 / rc.sparse_fps + EPS if budget else rc.dense_after)
                 self.stats["jobs_reopened"] += 1
             else:
-                job = PersonJob(tid, r[0], f.t + (1.0 / rc.sparse_fps + EPS if budget else rc.dense_after), self.t0)
+                fps = rc.dense_fps if rc.dense_fps < self.stream_fps - EPS else 0.0
+                job = PersonJob(tid, r[0], f.t + (1.0 / rc.sparse_fps + EPS if budget else rc.dense_after), self.t0, fps)
                 self.jobs.append(job)
                 self.last_job[tid] = job
                 self.stats["jobs_budget" if budget else "jobs"] += 1
@@ -881,6 +904,8 @@ class RealtimeSession:
             hist = [(o.t, o.box) for o in self.sparse.get(job.tid, []) if t_from - 1.0 / rc.sparse_fps < o.t < f.t - EPS]
             ts, boxes = [h[0] for h in hist] + [f.t], [h[1] for h in hist] + [r[0]]
             for fr in self.ring.between(t_from, f.t):
+                if not job.wants(fr.t):
+                    continue
                 items.append((fr.frame, interp_box(ts, boxes, fr.t)))
                 plan.append((job, fr))
         res = self._pose(items, "pose_dense")
@@ -1025,14 +1050,19 @@ class RealtimeDetector:
                 on_frame(f)
         ses.finish(last_t)
         wall, cpu = time.perf_counter() - start, time.process_time() - cpu0
-        meta.synthetic_from = stream_stats.get("synthetic_from")
-        stats = dict(ses.stats)
-        stats["cpu_sec"] = round(cpu, 2)  # процессорное время всех потоков: сколько ядер занято в среднем
-        stats["decoded_frames"] = stream_stats.get("decoded_frames", 0)
-        run = RtRun(meta=meta, jobs=[j.record() for j in ses.jobs], sparse=dict(ses.sparse), stats=stats,
-                    timings=dict(ses.tm), wall_time=wall, alerts=ses.alerts)  # fmt: skip
-        fix_frame_count(run)
-        return run, ses.jobs
+        return session_result(ses, meta, stream_stats, wall, cpu), ses.jobs
+
+
+def session_result(ses: RealtimeSession, meta: VideoMeta, stream_stats: dict, wall: float, cpu: float) -> RtRun:
+    """Итог законченной сессии (после finish) для кэша и анализа."""
+    meta.synthetic_from = stream_stats.get("synthetic_from")
+    stats = dict(ses.stats)
+    stats["cpu_sec"] = round(cpu, 2)  # процессорное время всех потоков: сколько ядер занято в среднем
+    stats["decoded_frames"] = stream_stats.get("decoded_frames", 0)
+    run = RtRun(meta=meta, jobs=[j.record() for j in ses.jobs], sparse=dict(ses.sparse), stats=stats,
+                timings=dict(ses.tm), wall_time=wall, alerts=ses.alerts)  # fmt: skip
+    fix_frame_count(run)
+    return run
 
 
 def analyze(run: RtRun, cfg: Config, roi: Roi, jobs: Optional[List[PersonJob]] = None,

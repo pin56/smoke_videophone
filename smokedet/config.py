@@ -265,6 +265,38 @@ class RealtimeConfig:
 
 
 @dataclass
+class ServeConfig:
+    """Сервер на много камер (serve.py, smokedet/serve): регулятор нагрузки и общие модели."""
+
+    tick: float = 1.0  # с между шагами регулятора и строками serve_log.csv
+    lag_low: float = 0.5  # с: отставание ниже — запас есть (ступени снижаются после calm_hold)
+    lag_high: float = 2.0  # с: отставание выше — давление растёт (тревога ~ отставание + 3 с правила)
+    lag_max: float = 6.0  # с: дальше камера пропускает кадры плотной сетки (тревога не позже ~10 с)
+    raise_hold: float = 3.0  # с между повышениями давления (отставанию нужно время, чтобы уйти)
+    calm_hold: float = 10.0  # с спокойствия на одно снижение (удваивается, если снижение вернуло отставание)
+    util_low: float = 0.85  # снижать ступени, только если загрузка (GPU/CPU) ниже
+    util_boost: float = 0.6  # буст (ступень −1) — только при загрузке ниже
+    people_hold: float = 10.0  # с: камера с людьми за это время — приоритет 1 (деградирует позже пустой)
+    boost: List[str] = field(default_factory=lambda: ["realtime.fill_budget=true"])  # ступень −1: запас на точность
+    # ступени деградации, накопительно; каждая — «секция.ключ=значение[,…]» из полей, которые сессия читает на лету;
+    # порядок — по цене на эталоне (README, «Сервер на много камер»): max_frames режет затяжки долгого курения
+    ladder: List[str] = field(
+        default_factory=lambda: [
+            "realtime.max_jobs=4",
+            "realtime.dense_fps=2.5",
+            "realtime.sparse_fps=0.5",
+            "appearance.max_frames=4",
+        ]
+    )
+    workers: int = 0  # исполнителей на модель (CPU: потоков OpenVINO; 0 — авто: 1 на GPU, ядра / 4 на CPU)
+    batch_wait_ms: float = 2.0  # мс, сколько исполнитель добирает запросы других камер в батч
+    max_batch: int = 24  # кропов позы / CLIP в одном батче
+    queue_sec: float = 20.0  # с кадров в очереди камеры; дальше старые кадры плотной сетки выбрасываются
+    reconnect: List[float] = field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0])  # паузы переподключения, с
+    decode_threads: int = 1  # потоков декодера FFmpeg на камеру (0 — по умолчанию OpenCV: все ядра на каждую камеру)
+
+
+@dataclass
 class ReportConfig:
     team: str = ""
     model_version: str = "smokedet-0.1.0"
@@ -291,6 +323,7 @@ SECTIONS = {
     "appearance": AppearanceConfig,
     "episode": EpisodeConfig,
     "realtime": RealtimeConfig,
+    "serve": ServeConfig,
     "report": ReportConfig,
 }
 
@@ -308,6 +341,7 @@ class Config:
     appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
+    serve: ServeConfig = field(default_factory=ServeConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
 
     def to_dict(self) -> Dict[str, Any]:
