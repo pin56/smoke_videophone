@@ -27,7 +27,7 @@ from .payload import build_payload
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).resolve().parent / "static"
-# на Windows mimetypes берёт типы из реестра и может отдать .js как text/plain
+
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -38,15 +38,15 @@ CONTENT_TYPES = {
     ".m4v": "video/mp4",
     ".mov": "video/quicktime",
 }
-BROWSER_CODECS = {"avc1", "h264", "x264"}  # H.264 в mp4 играет любой браузер
+BROWSER_CODECS = {"avc1", "h264", "x264"}
 BROWSER_CONTAINERS = {".mp4", ".m4v", ".mov"}
 CHUNK = 1 << 16
 
 
 @dataclass
 class ClipJob:
-    clip: object  # pipeline.ClipInput
-    state: str = "queued"  # idle (ждёт открытия) → queued → tracking → analyzing → ready | error
+    clip: object
+    state: str = "queued"
     progress: float = 0.0
     error: str = ""
     payload: Optional[bytes] = None
@@ -92,7 +92,7 @@ def browser_video(src: Path, proxy_dir: Path, clip_id: str) -> Path:
     log.info("[%s] перекодирую видео для браузера → %s", clip_id, proxy)
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-map", "0:v:0", "-c:v", "libx264", "-preset",
            "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-movflags", "+faststart",
-           str(tmp)]  # fmt: skip
+           str(tmp)]
     if subprocess.run(cmd).returncode == 0:
         tmp.replace(proxy)
         return proxy
@@ -114,7 +114,7 @@ class ClipStore:
         self._wake = threading.Condition()
         if lazy:
             for job in self.jobs.values():
-                # кэш треков есть — анализ быстрый, готовим сразу
+
                 job.state = "queued" if self._cached(job) else "idle"
 
     def start(self) -> threading.Thread:
@@ -151,13 +151,13 @@ class ClipStore:
 
     def run(self) -> None:
         pipeline = None
-        # клипы с готовым кэшем треков — первыми: интерфейс становится полезен сразу
+
         for job in sorted(self.jobs.values(), key=lambda j: not self._cached(j)):
             try:
                 if pipeline is None:
                     pipeline = self._factory()
                 self.process(pipeline, job)
-            except Exception as e:  # ошибка одного клипа не останавливает остальные
+            except Exception as e:
                 log.exception("[%s] не удалось подготовить клип", job.clip.clip_id)
                 job.state, job.error = "error", f"{type(e).__name__}: {e}"
 
@@ -176,13 +176,13 @@ class ClipStore:
         job.state, job.progress = "analyzing", 1.0
         analysis = pipeline.analyze(clip, ts)
         job.video = browser_video(Path(clip.video_path), self.out_dir / "ui", clip.clip_id)
-        tracks = stitch_tracks(ts.tracks, pipeline.cfg.tracking)  # те же треки, что у analyze
+        tracks = stitch_tracks(ts.tracks, pipeline.cfg.tracking)
         payload = build_payload(clip, ts.meta, tracks, analysis, pipeline.cfg, f"/video/{quote(clip.clip_id)}")
         job.payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
         job.events = payload["stats"]["events"]
         job.state = "ready"
         log.info("[%s] готов для интерфейса: людей %d, циклов %d, событий %d", clip.clip_id,
-                 payload["stats"]["tracks"], payload["stats"]["cycles"], job.events)  # fmt: skip
+                 payload["stats"]["tracks"], payload["stats"]["cycles"], job.events)
 
 
 def parse_range(header: Optional[str], size: int) -> Optional[Tuple[int, int]]:
@@ -203,7 +203,7 @@ def parse_range(header: Optional[str], size: int) -> Optional[Tuple[int, int]]:
 
 class UiServer(ThreadingHTTPServer):
     daemon_threads = True
-    # на Windows SO_REUSEADDR позволяет второму серверу молча занять тот же порт
+
     allow_reuse_address = sys.platform != "win32"
 
     def __init__(self, address: Tuple[str, int], store: ClipStore, static_dir: Path = STATIC):
@@ -244,7 +244,7 @@ class Handler(BaseHTTPRequestHandler):
                 if job is None:
                     self._error(HTTPStatus.NOT_FOUND, head)
                 elif job.payload is None:
-                    self.server.store.request(job.clip.clip_id)  # открыли — значит, нужен анализ
+                    self.server.store.request(job.clip.clip_id)
                     self._json(job.summary(), head, HTTPStatus.CONFLICT)
                 else:
                     self._send(job.payload, "application/json; charset=utf-8", head)
@@ -257,7 +257,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._error(HTTPStatus.NOT_FOUND, head)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass  # браузер обрывает запросы видео при перемотке — это нормально
+            pass
 
     def _send(self, data: bytes, ctype: str, head: bool, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_response(status)

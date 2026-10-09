@@ -1,6 +1,5 @@
-// Мониторинг: стена камер (эфир и архив), проверка загруженных видео, журнал эпизодов, просмотр фрагментов.
-// Данные — с сервера smokedet/monitor (monitor.py): кадры камер приходят потоком SSE, журнал и задания — JSON.
-// Система только отмечает эпизоды, похожие на курение («авто»); подтверждает или отклоняет их оператор.
+
+
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -41,13 +40,10 @@ let mode = "live";
 let filter = "all";
 const cams = [];
 const byId = new Map();
-let camEvents = [];          // эпизоды камер для боковой ленты
+let camEvents = [];
 let journalVersion = -1;
-let serverT = now();         // время сервера по последнему кадру
+let serverT = now();
 
-// ================= навигация =================
-
-// Адрес страницы: #monitor, #monitor/archive, #check, #check/<задание>, #journal, #journal/<эпизод>.
 function showPage(hash) {
   const [name, arg] = hash.split("/");
   page = ["monitor", "check", "journal"].includes(name) ? name : "monitor";
@@ -72,8 +68,6 @@ function segment(el, attr, onPick) {
     onPick(b.dataset[attr], b);
   });
 }
-
-// ================= стена камер =================
 
 function buildTiles(list) {
   const grid = $("grid");
@@ -110,7 +104,6 @@ function buildTiles(list) {
   }
 }
 
-// Что показывает плитка сейчас: в эфире — состояние с сервера, в архиве — кадр под курсором.
 function tileView(cam) {
   if (mode === "archive") {
     const fr = Archive.frameAt(cam.info.id, Archive.cursor);
@@ -122,7 +115,7 @@ function tileView(cam) {
   const st = cam.state || {};
   const health = st.health || "online";
   let det = st.detection || "unknown";
-  if (det !== "unknown" && cam.frame) { // вывод — из того же кадра, что и рамки людей (состояние приходит раз в секунду)
+  if (det !== "unknown" && cam.frame) {
     const states = cam.frame[1].map((r) => Scene.STATES[r[7]]);
     det = states.includes("smoking") ? "smoking" : states.includes("suspect") ? "suspect" : "normal";
   }
@@ -215,8 +208,6 @@ $("alarmsFirst").addEventListener("change", applyLayout);
 segment($("cols"), "c", (c) => document.documentElement.style.setProperty("--cols", c));
 segment($("mode"), "m", (m) => (m === "archive" ? Archive.enter() : Archive.leave()));
 
-// ================= эфир: поток SSE =================
-
 let source = null;
 function connect() {
   source = new EventSource("/api/live");
@@ -243,8 +234,6 @@ function connect() {
   source.onerror = () => { $("conn").textContent = "нет связи с сервером"; };
 }
 
-// ================= архив =================
-
 const Archive = {
   CHUNK: 60, STEP: 2,
   chunks: new Map(), loading: new Set(),
@@ -270,7 +259,6 @@ const Archive = {
     applyLayout();
   },
 
-  // Открыть архив на моменте t (отметка эпизода, кнопка «в архиве»).
   async openAt(t) {
     for (const x of $("mode").children) x.classList.toggle("on", x.dataset.m === "archive");
     if (location.hash !== "#monitor") location.hash = "#monitor";
@@ -329,7 +317,7 @@ const Archive = {
     const a = k * this.CHUNK, b = a + this.CHUNK;
     fetch(`/api/archive?from=${a}&to=${b}&step=${this.STEP}`).then((r) => r.json()).then((data) => {
       this.chunks.set(k, { cams: data.cams, partial: b > this.to - 1, fetched: now() });
-      if (this.chunks.size > 40) { // старые куски не держим
+      if (this.chunks.size > 40) {
         const far = [...this.chunks.keys()].sort((x, y) => Math.abs(x - this.key(this.cursor)) - Math.abs(y - this.key(this.cursor))).slice(40);
         far.forEach((x) => this.chunks.delete(x));
       }
@@ -406,14 +394,12 @@ $("arLive").addEventListener("click", () => Archive.leave());
     if (e.key === " ") { $("arPlay").click(); e.preventDefault(); }
   });
 })();
-setInterval(async () => { // запись растёт: правая граница архива
+setInterval(async () => {
   if (mode !== "archive") return;
   const atEnd = Archive.viewTo - Archive.cursor < 2;
   await Archive.refreshRange().catch(() => {});
   if (atEnd || Archive.to - Archive.viewTo > 30) { Archive.setPeriod(+$("arPeriod").value, false); }
 }, 5000);
-
-// ================= журнал =================
 
 function onJournalChanged() {
   loadCamEvents();
@@ -479,7 +465,7 @@ async function setReview(id, decision) {
   try {
     await api(`/api/events/${id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) });
   } catch (err) { alert(`Не удалось сохранить решение: ${err.message}`); }
-  // журнал перечитается по версии в потоке; страницы без потока — сразу
+
   onJournalChanged();
 }
 
@@ -535,12 +521,10 @@ $("jRows").addEventListener("click", (e) => {
   if (row) Player.open(+row.dataset.row);
 });
 
-// ================= окно камеры (эфир) =================
-
 const CamModal = {
   cam: null, view: null,
   open(cam) {
-    if (mode === "archive") { // в архиве плитка ведёт на кадр архива в полном размере не нужна: открываем эфир камеры
+    if (mode === "archive") {
       Archive.leave();
     }
     this.cam = cam;
@@ -595,8 +579,6 @@ const CamModal = {
 function openCam(cam) { CamModal.open(cam); }
 $("camModal").addEventListener("close", () => { CamModal.cam = null; });
 
-// ================= окно фрагмента =================
-
 const Player = {
   ev: null, clip: null, view: null, pos: 0, playing: true, a: 0, b: 0, evA: 0, evB: 0, kind: "",
 
@@ -642,7 +624,7 @@ const Player = {
       this.drawSim();
       if (opts.export) this.exportSim();
     } else {
-      this.kind = ev.clip_kind; // video — вырезанный фрагмент (время 0 = clip_start), range — окно в исходном файле
+      this.kind = ev.clip_kind;
       canvas.classList.add("hidden"); video.classList.remove("hidden");
       const base = this.kind === "video" ? this.a : 0;
       video.src = ev.clip_url;
@@ -704,7 +686,7 @@ const Player = {
     $("pRange").classList.toggle("hidden", eb <= ea && this.kind === "none");
   },
 
-  current() { // текущее время в шкале источника
+  current() {
     if (this.kind === "sim") return this.pos;
     if (this.kind === "video") return this.a + $("pVideo").currentTime;
     if (this.kind === "range") return $("pVideo").currentTime;
@@ -820,8 +802,6 @@ for (const d of document.querySelectorAll("dialog")) {
   d.addEventListener("click", (e) => { if (e.target === d || e.target.closest("[data-close]")) d.close(); });
 }
 
-// ================= проверка видео =================
-
 const Jobs = {
   list: [], uploads: [], selected: null, detail: null, timer: null,
   active() { return this.uploads.length > 0 || this.list.some((j) => j.state === "queued" || j.state === "analyzing"); },
@@ -836,7 +816,6 @@ async function loadJobs() {
   else if (Jobs.active()) Jobs.timer = setTimeout(loadJobs, 3000);
 }
 
-// журнал общий для запусков с разными анализаторами: видно, каким режимом проверена запись
 function analyzerTag(a) {
   if (a === "demo") return ' · <span class="tag">демо-анализ</span>';
   return a === "realtime" ? ' · <span class="tag">потоковый режим</span>' : "";
@@ -976,7 +955,7 @@ function upload(file) {
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) { u.progress = e.loaded / e.total; renderJobs(); } };
     xhr.onload = () => {
       let body = {};
-      try { body = JSON.parse(xhr.responseText); } catch (_) { /* пусто */ }
+      try { body = JSON.parse(xhr.responseText); } catch (_) {  }
       if (xhr.status === 201) {
         Jobs.uploads = Jobs.uploads.filter((x) => x !== u);
         Jobs.selected = body.id;
@@ -1000,8 +979,6 @@ const drop = $("drop");
 drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
 drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); uploadAll([...e.dataTransfer.files]); });
-
-// ================= общий цикл =================
 
 let lastFrame = performance.now();
 function loop(ts) {

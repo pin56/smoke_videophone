@@ -1,6 +1,5 @@
-// Отрисовка кадра камеры на canvas: фон сцены, люди с позой 17 точек, рамки, дым, шум матрицы.
-// Кадр приходит с сервера (smokedet/monitor/cameras.py, Person.encode):
-// [трек, x, y, направление, фаза шага, рука 0..1, роль, состояние, сигарета, тон, покачивание].
+
+
 "use strict";
 
 const Scene = (() => {
@@ -37,7 +36,7 @@ const Scene = (() => {
     };
   }
 
-  const heightOf = (p) => 0.2 + (p.y - 0.6) * 0.62; // доля высоты кадра
+  const heightOf = (p) => 0.2 + (p.y - 0.6) * 0.62;
   const faceOf = (p) => (p.role === "walker" ? p.dir : (p.sway > 3 ? 1 : -1));
 
   function skeleton(p, aspect, t) {
@@ -88,7 +87,7 @@ const Scene = (() => {
       const wallG = g.createLinearGradient(0, 0, 0, horizon);
       wallG.addColorStop(0, "#1c2129"); wallG.addColorStop(1, "#2a3039");
       g.fillStyle = wallG; g.fillRect(0, 0, w, horizon);
-      for (let i = 0; i < 4; i++) { // двери и табло
+      for (let i = 0; i < 4; i++) {
         const x = w * (0.08 + i * 0.24 + r() * 0.04);
         g.fillStyle = i % 2 ? "#151a21" : "#323a46";
         g.fillRect(x, horizon - h * 0.26, w * 0.1, h * 0.26);
@@ -100,7 +99,7 @@ const Scene = (() => {
       sky.addColorStop(0, "#1d2532"); sky.addColorStop(1, "#38404c");
       g.fillStyle = sky; g.fillRect(0, 0, w, horizon);
       let x = -r() * w * 0.1;
-      while (x < w) { // дома
+      while (x < w) {
         const bw = w * (0.12 + r() * 0.16), bh = h * (0.14 + r() * 0.24);
         g.fillStyle = `hsl(215, 9%, ${11 + r() * 8}%)`;
         g.fillRect(x, horizon - bh, bw - 3, bh);
@@ -118,17 +117,17 @@ const Scene = (() => {
     ground.addColorStop(1, cam.kind === "indoor" ? "#22262c" : "#191c21");
     g.fillStyle = ground; g.fillRect(0, horizon, w, h - horizon);
 
-    const vx = w * (0.3 + r() * 0.4); // перспективные линии
+    const vx = w * (0.3 + r() * 0.4);
     g.strokeStyle = "rgba(255, 255, 255, 0.06)"; g.lineWidth = 1;
     for (let i = -6; i <= 6; i++) { g.beginPath(); g.moveTo(vx, horizon); g.lineTo(vx + i * w * 0.22, h); g.stroke(); }
     if (cam.kind === "platform") {
       g.fillStyle = "rgba(250, 204, 21, 0.35)";
       g.beginPath(); g.moveTo(vx - 2, horizon); g.lineTo(vx + 2, horizon); g.lineTo(w * 0.06, h); g.lineTo(-w * 0.02, h); g.fill();
-      g.fillStyle = "#14181e"; g.fillRect(0, 0, w, h * 0.09); // навес
+      g.fillStyle = "#14181e"; g.fillRect(0, 0, w, h * 0.09);
       for (let i = 0; i < 5; i++) { g.fillStyle = "#1a1f27"; g.fillRect(w * (0.12 + i * 0.2), h * 0.09, w * 0.018, horizon - h * 0.09 + h * 0.05); }
     } else if (cam.kind === "street") {
       g.fillStyle = "rgba(255, 255, 255, 0.05)"; g.fillRect(0, horizon + h * 0.04, w, h * 0.012);
-      const px = w * (0.55 + r() * 0.3); // павильон остановки
+      const px = w * (0.55 + r() * 0.3);
       g.fillStyle = "rgba(150, 180, 210, 0.08)"; g.fillRect(px, horizon - h * 0.2, w * 0.28, h * 0.24);
       g.strokeStyle = "rgba(200, 220, 240, 0.18)"; g.strokeRect(px, horizon - h * 0.2, w * 0.28, h * 0.24);
       g.fillStyle = "#14181e"; g.fillRect(px - 4, horizon - h * 0.23, w * 0.28 + 8, h * 0.035);
@@ -136,7 +135,6 @@ const Scene = (() => {
     return c;
   }
 
-  // Состояние отрисовки одной камеры на одном canvas: кэш фона, частицы дыма, прошлая поза для выдохов.
   class View {
     constructor(cam) {
       this.cam = cam;
@@ -149,7 +147,6 @@ const Scene = (() => {
 
     reset() { this.smoke = []; this.prevA.clear(); this.lastT = null; }
 
-    // Подготовить canvas: размер под CSS (или фиксированный — для выгрузки ролика) и контекст.
     prepare(canvas, size) {
       const dpr = size ? 1 : Math.min(window.devicePixelRatio || 1, 2);
       const w = size ? size[0] : canvas.clientWidth, h = size ? size[1] : canvas.clientHeight;
@@ -189,7 +186,7 @@ const Scene = (() => {
         g.lineTo(X(s.hipR) + Hp * 0.02, Y(s.hipR)); g.lineTo(X(s.hipL) - Hp * 0.02, Y(s.hipL)); g.closePath(); g.fill();
         g.beginPath(); g.arc(X(s.nose) - (s.nose.x - s.earL.x) * w * 0.35, Y(s.nose) - Hp * 0.01, Hp * 0.07, 0, Math.PI * 2); g.fill();
 
-        if (p.role === "smoker" && p.lit) { // сигарета
+        if (p.role === "smoker" && p.lit) {
           const f = faceOf(p);
           const wx = X(s.wrR), wy = Y(s.wrR), tx = wx + f * Hp * 0.035, ty = wy - Hp * 0.008;
           g.strokeStyle = "rgba(240, 240, 235, 0.9)"; g.lineWidth = Math.max(1, Hp * 0.012);
@@ -199,7 +196,7 @@ const Scene = (() => {
           const tg = g.createRadialGradient(tx, ty, 0, tx, ty, rr);
           tg.addColorStop(0, `rgba(255, 150, 60, ${tip})`); tg.addColorStop(1, "rgba(255, 120, 40, 0)");
           g.fillStyle = tg; g.beginPath(); g.arc(tx, ty, rr, 0, Math.PI * 2); g.fill();
-        } else if (p.role === "sipper") { // стакан
+        } else if (p.role === "sipper") {
           g.fillStyle = "rgba(210, 225, 240, 0.75)";
           g.fillRect(X(s.wrR) - Hp * 0.015, Y(s.wrR) - Hp * 0.05, Hp * 0.03, Hp * 0.06);
         }
@@ -212,7 +209,7 @@ const Scene = (() => {
         for (const k in s) { g.beginPath(); g.arc(X(s[k]), Y(s[k]), big ? 2.4 : 1.6, 0, Math.PI * 2); g.fill(); }
         g.globalAlpha = 1;
 
-        if (p.state !== "normal" && p.a > 0.05) { // кисть → рот
+        if (p.state !== "normal" && p.a > 0.05) {
           g.setLineDash([3, 3]); g.strokeStyle = col; g.lineWidth = 1;
           g.beginPath(); g.moveTo(X(s.wrR), Y(s.wrR)); g.lineTo(X(s.nose), Y(s.nose) + Hp * 0.03); g.stroke();
           g.setLineDash([]);
@@ -250,8 +247,8 @@ const Scene = (() => {
         g.fillStyle = sg; g.beginPath(); g.arc(s.x * w, s.y * h, rr, 0, Math.PI * 2); g.fill();
       }
 
-      if (opts.noNoise) return; // в выгружаемом ролике шум только раздувает файл
-      g.globalAlpha = 0.07; // шум матрицы
+      if (opts.noNoise) return;
+      g.globalAlpha = 0.07;
       g.globalCompositeOperation = "overlay";
       const ox = Math.random() * 160, oy = Math.random() * 160;
       g.translate(-ox, -oy);
@@ -262,7 +259,6 @@ const Scene = (() => {
       g.globalAlpha = 1;
     }
 
-    // Дым: выдох, когда курящий отводит руку, и тонкая струйка от сигареты. Скачок времени (перемотка) — сброс.
     updateSmoke(people, t, aspect) {
       const dt = this.lastT === null ? 0 : t - this.lastT;
       this.lastT = t;
@@ -289,7 +285,6 @@ const Scene = (() => {
       }
     }
 
-    // Кадра нет: чёрный экран с пояснением (нет сигнала, ошибка, нет записи).
     blank(canvas, title, sub, opts = {}) {
       const c = this.prepare(canvas, opts.size);
       if (!c) return;

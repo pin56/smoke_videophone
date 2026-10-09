@@ -20,7 +20,7 @@ from ..io_video import VideoMeta
 from ..roi import Roi
 from ..tracking import PersonObs
 
-# причины отказа циклов (cycles.py) — понятным языком
+
 CYCLE_REASONS = {
     "no_approach": "рука не подходила ко рту, а уже была у лица",
     "short_hold": "слишком короткая пауза у рта",
@@ -32,7 +32,7 @@ CYCLE_REASONS = {
     "head_tilt": "голова запрокинута — похоже на питьё",
 }
 
-# классы верификатора (config.VerifierConfig)
+
 OBJECT_NAMES = {
     "cigarette": "сигарета",
     "vape": "вейп",
@@ -160,7 +160,7 @@ def track_payload(sig: TrackSignal, obs: Sequence[PersonObs]) -> dict:
         "kp": None,
         "kc": None,
     }
-    if len(obs) == len(sig):  # build_signal даёт по отсчёту на наблюдение
+    if len(obs) == len(sig):
         k = np.stack([o.kpts for o in obs])
         data["kp"] = np.round(k[:, :, :2]).astype(int).reshape(len(obs), -1).tolist()
         data["kc"] = np.round(k[:, :, 2] * 100).astype(int).tolist()
@@ -243,7 +243,7 @@ def build_payload(
                 "n_movements": movements(e.cycles),
                 "evidence": ev,
                 "basis": basis_text(e.cycles, positive),
-                # основание на момент появления: циклы, закончившиеся к reveal_t
+
                 "reveal_basis": basis_text([c for c in e.cycles if c.end <= reveal], positive),
                 "reveal_t": _num(reveal),
             }
@@ -313,7 +313,7 @@ def build_feed(cycles: List[dict], events: List[dict], flashes: List[dict], thre
             feed.append({"t": c["reveal_t"], "track_id": c["track_id"], "kind": "reject", "text": text, "ref": c["id"]})
     for f in flashes:
         feed.append({"t": f["end"], "track_id": f["track_id"], "kind": "flash", "text": "вспышка у лица — зажигалка?",
-                     "ref": None})  # fmt: skip
+                     "ref": None})
     for e in events:
         row = {"track_id": e["track_id"], "ref": e["id"]}
         if e["passed"]:

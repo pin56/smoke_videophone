@@ -1,4 +1,4 @@
-/* Мониторинг: стена камер, архив, проверка видео, журнал. Шрифт — Inter. */
+
 :root {
   --bg: #111214;
   --panel: #18191c;
@@ -46,8 +46,6 @@ a { color: inherit; }
   vertical-align: 1px;
 }
 
-/* ---------- шапка ---------- */
-
 .top {
   display: flex;
   align-items: center;
@@ -90,8 +88,6 @@ a { color: inherit; }
 .clock { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
 .clock b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; margin-left: 6px; }
 .conn:not(:empty) { margin-left: 10px; color: var(--alarm-text); font-weight: 500; }
-
-/* ---------- панель инструментов ---------- */
 
 .toolbar {
   display: flex;
@@ -138,8 +134,6 @@ select {
   font-size: 13px;
 }
 
-/* ---------- архив ---------- */
-
 .archive-bar {
   margin: 12px 24px 0;
   padding: 10px 12px 8px;
@@ -180,8 +174,6 @@ select {
 .ar-scale { position: relative; height: 16px; margin-top: 3px; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
 .ar-scale span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 
-/* ---------- раскладка ---------- */
-
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
@@ -195,8 +187,6 @@ select {
   grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
   gap: 12px;
 }
-
-/* ---------- плитка камеры ---------- */
 
 .tile {
   display: flex;
@@ -290,8 +280,6 @@ select {
 .h-error { color: var(--alarm-text); }
 .tile[data-health="no_signal"] .h-detail, .tile[data-health="error"] .h-detail { white-space: normal; }
 
-/* ---------- лента эпизодов на стене ---------- */
-
 .journal {
   position: sticky;
   top: 12px;
@@ -367,8 +355,6 @@ body > .banner { margin: 12px 24px; }
 
 .disclaimer { margin: 10px 24px 0; color: var(--muted); font-size: 12px; max-width: 900px; }
 
-/* ---------- журнал ---------- */
-
 .table-wrap { margin: 12px 24px 24px; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
 .jtable { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 980px; }
 .jtable th {
@@ -399,8 +385,6 @@ body > .banner { margin: 12px 24px; }
 .rv-pending { color: var(--muted); font-weight: 400; }
 .rv-confirmed { color: var(--text); }
 .rv-rejected { color: var(--faint); }
-
-/* ---------- проверка видео ---------- */
 
 .check-layout {
   display: grid;
@@ -460,8 +444,6 @@ body > .banner { margin: 12px 24px; }
 .ep-main b { font-weight: 600; }
 .ep-main span { color: var(--muted); font-size: 13px; }
 .ep-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-
-/* ---------- окна ---------- */
 
 dialog {
   width: min(1240px, calc(100vw - 32px));
@@ -527,8 +509,6 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.7); }
 .modal-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 8px; flex-wrap: wrap; align-items: center; }
 .modal-actions .btn { padding: 6px 12px; font-size: 13px; }
 .modal-actions .hint { flex-basis: 100%; }
-
-/* ---------- адаптив ---------- */
 
 @media (max-width: 1080px) {
   .layout, .check-layout { grid-template-columns: 1fr; }

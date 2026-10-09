@@ -1,7 +1,4 @@
 "use strict";
-// Повтор анализа синхронно с видео. Данные — /api/clips/<id> (smokedet/ui/payload.py).
-// Время анализа — pts кадра, время <video> (currentTime, mediaTime) — тоже pts: пересчёт не нужен.
-// Режим по умолчанию показывает только то, что анализ «знает» к текущему моменту (reveal_t).
 
 const $ = (id) => document.getElementById(id);
 const video = $("video");
@@ -19,16 +16,16 @@ const C = {
   muted: "#8a96a8",
   line: "#253044",
 };
-// рёбра скелета COCO-17
+
 const SKELETON = [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12], [5, 6], [5, 7], [6, 8],
   [7, 9], [8, 10], [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]];
-const EVENT_TAIL = 3; // с: рамка эпизода остаётся красной после его конца
-const FRESH = 3; // с: столько подпись нового цикла или отказа висит у рамки
-const ALERT_FOR = 4; // с: баннер нового эпизода
-const MAX_GAP = 0.45; // с: дальше от отсчёта трека человек не рисуется
-const KP_MIN = 30; // уверенность точки позы ×100
-const D_MAX = 2.0; // верх шкалы графика d(t)
-const LEAD = 4; // с: переход к эпизоду — с запасом, чтобы видеть подход руки
+const EVENT_TAIL = 3;
+const FRESH = 3;
+const ALERT_FOR = 4;
+const MAX_GAP = 0.45;
+const KP_MIN = 30;
+const D_MAX = 2.0;
+const LEAD = 4;
 const RANK = { off: 0, track: 1, hold: 2, event: 3 };
 const CYCLES = ["цикл", "цикла", "циклов"];
 const EPISODES = ["эпизод", "эпизода", "эпизодов"];
@@ -48,8 +45,6 @@ let dirty = true;
 let feedKey = "";
 let prevT = 0;
 let dragging = false;
-
-// ---------- утилиты ----------
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp = (p, q, a) => p + (q - p) * a;
@@ -83,7 +78,6 @@ function cut(s, n) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-// известно ли к моменту t то, что открывается в reveal_t
 const known = (rt, t) => opt.all || (rt !== null && rt <= t);
 
 function lowerBound(arr, v) {
@@ -159,8 +153,6 @@ function dot(ctx, x, y, r, fill, stroke) {
   }
 }
 
-// ---------- данные ----------
-
 function prepare(d) {
   d.byTrack = new Map();
   for (const tr of d.tracks) {
@@ -178,7 +170,6 @@ function prepare(d) {
   return d;
 }
 
-// отсчёты трека вокруг t: интерполяция i → j с весом a; null — человека в этот момент нет
 function sampleAt(tr, t) {
   const ts = tr.t;
   const n = ts.length;
@@ -230,7 +221,6 @@ function stateAt(tr, s, t) {
   return { kind: tr.valid[s.i] ? "track" : "off" };
 }
 
-// действие руки в момент t по границам цикла (без оценки валидности): подъём → пауза у рта → отвод
 function phaseAt(tr, t) {
   for (const c of tr.cycles) {
     if (c.start <= t && t < c.hold_start) return { name: "рука идёт ко рту", cycle: c };
@@ -242,14 +232,12 @@ function phaseAt(tr, t) {
 
 const f2 = (v, n = 2) => (v === null || v === undefined ? "—" : v.toFixed(n));
 
-// последний цикл, о котором анализ уже знает к моменту t
 function lastCycle(tr, t) {
   let best = null;
   for (const c of tr.cycles) if (known(c.reveal_t, t) && (!best || c.end > best.end)) best = c;
   return best;
 }
 
-// строки признаков и расчётов цикла для подписи у рамки
 function featureLines(c) {
   const th = data.thresholds;
   const out = [];
@@ -272,7 +260,6 @@ function visibleAt(t) {
   return out.sort((a, b) => RANK[a.st.kind] - RANK[b.st.kind]);
 }
 
-// состояние правила эпизода у человека к моменту t (всегда «как вживую», без учёта «показать всё»)
 function ruleState(tr, t) {
   const done = tr.cycles
     .filter((c) => c.valid && c.reveal_t <= t && c.end >= t - data.thresholds.window)
@@ -285,8 +272,6 @@ function ruleState(tr, t) {
   const ev = tr.events.find((e) => e.reveal_t <= t && t <= e.end + EVENT_TAIL) || null;
   return { moves, direct, ev };
 }
-
-// ---------- кадр: оверлей ----------
 
 function frameRect(w, h) {
   const vw = data.clip.width;
@@ -312,7 +297,7 @@ function drawOverlay(t, vis) {
     ctx.beginPath();
     ctx.rect(f.x, f.y, data.clip.width * f.k, data.clip.height * f.k);
     polys();
-    ctx.fillStyle = "rgba(6, 9, 14, 0.5)"; // вне зоны интереса — притемнено
+    ctx.fillStyle = "rgba(6, 9, 14, 0.5)";
     ctx.fill("evenodd");
     ctx.beginPath();
     polys();
@@ -426,11 +411,9 @@ function badges(ctx, tr, t, x, y, maxW, maxH, last) {
     if (c.vapor && c.vapor_t !== null && c.vapor_t <= t && t <= c.vapor_t + 1.5) items.push(["выдох", C.vapor]);
   }
   const shown = items.slice(0, 8);
-  y = Math.min(y, maxH - shown.length * 21); // у нижнего края кадра — внутрь
+  y = Math.min(y, maxH - shown.length * 21);
   for (const [text, bg, fg] of shown) y += tag(ctx, text, x, y, bg, fg || "#0a0d12", 11, false, maxW, maxH) + 3;
 }
-
-// ---------- шкала времени ----------
 
 const TL_PAD = 10;
 
@@ -439,7 +422,7 @@ function drawTimeline(t) {
   if (!data) return;
   const dur = Math.max(data.clip.duration || video.duration || 1, 0.1);
   const X = (s) => TL_PAD + (clamp(s, 0, dur) / dur) * (w - 2 * TL_PAD);
-  const top = h - 18; // ниже — подписи времени
+  const top = h - 18;
   const until = (s) => (opt.all ? s : Math.min(s, t));
 
   ctx.font = "10px system-ui, sans-serif";
@@ -479,7 +462,7 @@ function drawTimeline(t) {
     }
   }
   if (!opt.all) {
-    // ещё не проанализировано
+
     ctx.fillStyle = "rgba(10, 13, 18, 0.6)";
     ctx.fillRect(X(t), 0, w - X(t), top);
   }
@@ -499,8 +482,6 @@ function seekFromPointer(e) {
   const dur = data.clip.duration || video.duration || 0;
   seek(clamp((e.clientX - r.left - TL_PAD) / (r.width - 2 * TL_PAD), 0, 1) * dur);
 }
-
-// ---------- правая колонка ----------
 
 function drawChart(cv, tr, t, col) {
   const { ctx, w, h } = sizeCanvas(cv);
@@ -678,12 +659,10 @@ function updateAlert(t) {
     el.textContent = `⚠ Эпизод: id${e.track_id} · ${opt.all ? e.basis : e.reveal_basis}`;
     el.classList.remove("hidden");
     el.style.animation = "none";
-    void el.offsetWidth; // перезапуск анимации появления
+    void el.offsetWidth;
     el.style.animation = "";
   }
 }
-
-// ---------- кадр целиком ----------
 
 function setHTML(el, key, html) {
   if (el.dataset.key === key) return;
@@ -691,7 +670,6 @@ function setHTML(el, key, html) {
   el.innerHTML = html;
 }
 
-// карточка «Признаки и расчёты»: выбранный (или самый активный) человек в текущий момент
 function updateCalc(t, vis) {
   let tr = focusId !== null ? data.byTrack.get(focusId) || null : null;
   if (!tr) {
@@ -729,7 +707,6 @@ function updateCalc(t, vis) {
   setHTML(el, `${tr.id}|${dn === null ? "" : dn.toFixed(2)}|${ph ? ph.name : ""}|${c ? c.id : ""}|${r.moves}`, `<table>${rows.join("")}</table>`);
 }
 
-// статистика клипа целиком
 function updateClipStats() {
   const el = $("clipStats");
   const cs = data.cycles;
@@ -781,7 +758,7 @@ function render(t) {
 }
 
 function onVideoFrame(now, meta) {
-  mediaT = meta.mediaTime; // время показанного кадра точнее currentTime
+  mediaT = meta.mediaTime;
   frameHandle = video.requestVideoFrameCallback(onVideoFrame);
 }
 
@@ -801,8 +778,6 @@ function loop() {
   }
   requestAnimationFrame(loop);
 }
-
-// ---------- управление ----------
 
 function seek(t) {
   if (!data) return;
@@ -881,14 +856,14 @@ async function loadClip(id) {
   dirty = true;
   const c = clips.find((x) => x.id === id);
   showWait(c);
-  if (c && c.state === "idle") fetch(`/api/clips/${encodeURIComponent(id)}`, { cache: "no-store" }).catch(() => {}); // запрос запускает обработку
+  if (c && c.state === "idle") fetch(`/api/clips/${encodeURIComponent(id)}`, { cache: "no-store" }).catch(() => {});
   if (!c || c.state !== "ready") return;
   loading = true;
   try {
     const r = await fetch(`/api/clips/${encodeURIComponent(id)}`, { cache: "no-store" });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = prepare(await r.json());
-    if (clipId !== id) return; // пока грузили, выбрали другой клип
+    if (clipId !== id) return;
     data = d;
     const cl = d.clip;
     $("clipMeta").textContent = `${cl.camera_id} · ${cl.video_name} · ${cl.width}×${cl.height} · ${fmt(cl.duration, false)}` +
@@ -928,7 +903,7 @@ async function pollClips() {
     }
     const cur = clips.find((c) => c.id === clipId);
     if (clipId === null || (!userChose && !data && !loading && cur && cur.state !== "ready")) {
-      // первый показ: клип из адреса, иначе первый готовый
+
       const want = decodeURIComponent((location.hash.match(/[#&]clip=([^&]+)/) || [])[1] || "");
       const pick = clips.find((c) => c.id === want) || clips.find((c) => c.state === "ready") || clips[0];
       if (want && pick && pick.id === want) userChose = true;
@@ -940,7 +915,7 @@ async function pollClips() {
       showWait(cur);
     }
   } catch (e) {
-    // сервер недоступен — попробуем снова
+
   }
   const busy = !clips.length || clips.some((c) => c.state !== "ready" && c.state !== "error");
   setTimeout(pollClips, busy ? 1000 : 5000);
