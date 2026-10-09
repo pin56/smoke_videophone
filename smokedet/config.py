@@ -213,6 +213,9 @@ class RealtimeConfig:
     pose_conf: float = 0.1
     half: bool = True  # FP16, только на CUDA
     threads: int = 0  # потоков инференса на CPU (torch, OpenCV, OpenVINO); 0 — по умолчанию библиотек (все ядра)
+    # точность OpenVINO на CPU: "" — по умолчанию устройства (bf16 на Zen 4/5 и Xeon с AMX/AVX512-BF16),
+    # f32 — как на процессорах без bf16 (N100 и т. п.): замер бюджета дешёвого бокса
+    ov_precision: str = ""
     crop_pad: float = 0.25  # кроп человека: рамка плюс такая доля её сторон с каждой стороны
     match_iou: float = 0.3  # поза в кропе — этого человека, если IoU её рамки с рамкой человека не ниже
     track_iou: float = 0.1  # трекер 1 Гц: пара «трек — рамка» при IoU не ниже...

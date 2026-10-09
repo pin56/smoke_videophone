@@ -142,7 +142,7 @@ def main(argv=None) -> int:
         import psutil
 
         psutil.Process().cpu_affinity([int(c) for c in args.cpus.split(",")])
-    limit_threads(cfg.realtime.threads)
+    limit_threads(cfg.realtime.threads, cfg.realtime.ov_precision)
 
     if args.inputs:
         clips = read_inputs_csv(args.inputs)

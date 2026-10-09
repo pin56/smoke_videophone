@@ -349,7 +349,8 @@ def test_skip_confirmed_only_after_confident_event():
     assert not ses._confirmed(1, nxt)
 
 
-def test_alert_hold_in_cache_key_only_when_set():
+def test_new_realtime_fields_in_cache_key_only_when_set():
     cfg = Config()
     assert inference_hash(cfg) == inference_hash(with_overrides(cfg, ["realtime.skip_confirmed=true"]))
     assert inference_hash(cfg) != inference_hash(with_overrides(cfg, ["realtime.alert_hold=20"]))
+    assert inference_hash(cfg) != inference_hash(with_overrides(cfg, ["realtime.ov_precision=f32"]))

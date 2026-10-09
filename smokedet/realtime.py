@@ -53,7 +53,7 @@ RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", 
                "start_hold", "threads", "skip_confirmed")  # fmt: skip
 # поля, добавленные после первых прогонов: в ключ кэша входят, только если отличаются от этих значений (старые кэши
 # остаются действительны)
-HASH_DEFAULTS = {"alert_hold": 0.0}
+HASH_DEFAULTS = {"alert_hold": 0.0, "ov_precision": ""}
 DUP_IOU = 0.8  # два задания плотной проверки с такими рамками — один человек (рамки позы сошлись на нём)
 EPS = 1e-6
 PREFETCH = 8  # кадров плотной сетки, декодированных заранее (поток чтения работает, пока занят GPU)
@@ -670,30 +670,33 @@ def load_run(path: Path, key: str) -> Optional[RtRun]:
 STAGES = ("decode_wait", "detect", "pose_sparse", "pose_dense", "cycles", "objects")
 
 
-def limit_threads(n: int) -> None:
-    """Ограничить инференс на CPU n потоками: torch, OpenCV и OpenVINO.
+def limit_threads(n: int, precision: str = "") -> None:
+    """Ограничить инференс на CPU n потоками: torch, OpenCV и OpenVINO; precision — INFERENCE_PRECISION_HINT
+    OpenVINO (f32 — как на процессорах без bf16), пусто — по умолчанию устройства.
 
     ultralytics компилирует модели OpenVINO на устройстве AUTO со своим конфигом без числа потоков (берёт все ядра),
     а настройка одного ov.Core на другие не действует, поэтому Core.compile_model подменяется: AUTO → CPU (AUTO
     не принимает INFERENCE_NUM_THREADS) и подставляется число потоков."""
-    if n <= 0:
+    if n <= 0 and not precision:
         return
-    # OpenMP torch по умолчанию крутит потоки в ожидании (~200 мс): на n ядрах это отнимает их у OpenVINO и декодера
-    os.environ.setdefault("KMP_BLOCKTIME", "0")
-    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
-    import torch
+    if n > 0:
+        # OpenMP torch по умолчанию крутит потоки в ожидании (~200 мс): на n ядрах это отнимает их у OpenVINO и декодера
+        os.environ.setdefault("KMP_BLOCKTIME", "0")
+        os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+        import torch
 
-    torch.set_num_threads(n)
-    cv2.setNumThreads(n)
+        torch.set_num_threads(n)
+        cv2.setNumThreads(n)
     try:
         import openvino as ov
     except ImportError:
         return
     compile_model = ov.Core.compile_model
+    extra = {**({"INFERENCE_NUM_THREADS": n} if n > 0 else {}), **({"INFERENCE_PRECISION_HINT": precision} if precision else {})}
 
     def compile_limited(self, model, device_name=None, config=None, *args, **kwargs):
         if device_name in (None, "CPU", "AUTO"):
-            device_name, config = "CPU", {"INFERENCE_NUM_THREADS": n, **(config or {})}
+            device_name, config = "CPU", {**extra, **(config or {})}
         return compile_model(self, model, device_name, config, *args, **kwargs)
 
     ov.Core.compile_model = compile_limited
