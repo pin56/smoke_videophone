@@ -3,8 +3,8 @@
 realtime:
   det_model: weights/yolo11n.pt
   pose_model: weights/yolo11m-pose.pt
-  many_median: 3.5          # долгое курение, где сигарета видна средне (студенты: F1 0.460 → 0.489, затяжки 71 → 152 из 302)
-  rule_overrides:           # как в configs/default.yaml, но appearance.min_score 0 (пороги CLIP 9/9/0 под вход 168 px)
+  skip_confirmed: true      # CLIP новых циклов уже подтверждённого события не считается (на эталоне без потерь)
+  rule_overrides:           # как в configs/default.yaml, но appearance.min_score 3.5 (два вида кропа, max — README, «На CPU»)
     - episode.min_cycles=1
     - episode.confidence_threshold=0.1
     - cycle.min_hold=0.2
@@ -18,17 +18,16 @@ realtime:
     - cycle.max_wrist_above_mouth=10
     - cycle.max_elbow_raise=10
     - cycle.min_face_visible=0
-    - appearance.min_score=0
+    - appearance.min_score=3.5
 appearance:
   model: ViT-L/14           # вход 168 px: позиции ViT интерполируются, кропы «рот + кисть» мелкие (README, «На CPU»)
   input_px: 168
-  tight_scale: 0.2
-  frame_agg: top2
+  tight_scale: 0            # без тесного кропа и с max: студенты на GPU FP 62 → 29 при тех же 3/3 эпизодах и 32/32 затяжках
+  frame_agg: max
   direct_score: 9
   rescue_score: 9
 serve:
-  ladder:                   # как в configs/default.yaml, но первой — skip_confirmed (в профиле CPU он в базе)
-    - realtime.skip_confirmed=true
+  ladder:                   # как в configs/default.yaml (skip_confirmed уже в базе)
     - realtime.max_jobs=4
     - realtime.dense_fps=2.5
     - realtime.sparse_fps=0.5
