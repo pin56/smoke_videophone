@@ -15,7 +15,8 @@
 
 Клипы связываются по имени видеофайла (stem), а не по clip_id: clip_id зависит от прогона. clip_id
 предсказания переводится в видео по processing_log.csv прогона (video_path). Папка видео (true/false) —
-по video_path: в false курения нет нигде, любое предсказание без IGNORE — FP, даже без строк NOSMOKE.
+по match_markup.FILES, для прочих — по video_path (прогоны videos/students оцениваются без пересчёта): в false
+курения нет нигде, любое предсказание без IGNORE — FP, даже без строк NOSMOKE.
 Клипы из true без строк разметки исключаются из метрик (список выводится).
 
 Выход в --out (по умолчанию <run>/markup_eval): summary.md, matches.csv, per_clip.csv; сводка — в stdout.
@@ -35,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
-from match_markup import canonical_stem  # noqa: E402
+from match_markup import FILES, canonical_stem  # noqa: E402
 from smokedet.evaluation import EvalParams, Item, evaluate, overlap  # noqa: E402
 
 MERGE_GAP = 15.0  # с: отметки одного клипа с меньшим зазором — один эпизод (правило кейса)
@@ -135,7 +136,9 @@ def load_run(run_dir: str) -> Dict[str, RunClip]:
     with open(run / "processing_log.csv", newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             vp = Path(r["video_path"].replace("\\", "/"))
-            by_id[r["clip_id"]] = RunClip(canonical_stem(vp.stem), r["clip_id"], vp.parent.name, float(r["duration_sec"]))
+            stem = canonical_stem(vp.stem)
+            folder = FILES.get(stem, (vp.parent.name,))[0]
+            by_id[r["clip_id"]] = RunClip(stem, r["clip_id"], folder, float(r["duration_sec"]))
     pred_path = run / "predictions.csv"
     if pred_path.exists():
         with open(pred_path, newline="", encoding="utf-8") as f:

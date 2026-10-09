@@ -1,7 +1,14 @@
 """Сопоставление разметки rasmetka.md с видео и предсказаниями прогонов.
 
 Запуск из корня проекта: пишет rasmetka_gt.csv и сверяет его с runs/true_now и runs/false.
-Импорт (tools/eval_markup.py) берёт отсюда только имена файлов (canonical_stem) и разбор времени (sec).
+Импорт (tools/eval_markup.py) берёт отсюда имена файлов (canonical_stem), папку видео (FILES) и разбор времени (sec).
+
+Студенты (smoke1..17, видео — жёсткие ссылки videos/students -> videos/true|false) — в rasmetka_students.md
+того же формата: курят только события, подтверждённые пользователем 2026-10-09 (smoke6 т1 и т24, smoke7 т1,
+smoke15 т6), отметки — циклы этих треков из data/labeling/students; остальные 14 клипов — false (имитация).
+
+rasmetka_sheets.md — курение, которого нет в rasmetka.md: события потокового прогона l168 на старых true-клипах,
+подтверждённые пользователем по листам runs/vlm/true_sheets (2026-10-09), отметки — их циклы.
 """
 import csv, re, sys, collections
 import unicodedata
@@ -22,7 +29,9 @@ _FILES = {  # stem -> (папка, clip_id в runs/true_now|false)
        "2025_11_06_08_33_31": "false_6", "2025_11_06_08_35_37": "false_7", "drinking_Jar": "false_8",
        "smoking_noyabrsk_2": "false_9", "smoking_noyabrsk_3": "false_10", "распитие (2)": "false_11",
        "распитие": "false_12"}.items()},
+    **{f"smoke{i}": ("true" if i in (6, 7, 15) else "false", f"smoke{i}") for i in range(1, 18)},
 }
+MARKUP = ("rasmetka.md", "rasmetka_students.md", "rasmetka_sheets.md")
 
 FILES = _FILES
 LOW = {k.lower(): k for k in _FILES}
@@ -50,7 +59,8 @@ def sec(s):
 
 def main():
     rows, prev = [], None
-    for ln in open("rasmetka.md", encoding="utf-8").read().splitlines()[1:]:
+    lines = [ln for path in MARKUP for ln in open(path, encoding="utf-8").read().splitlines()[1:]]
+    for ln in lines:
         p = [x.strip().strip('"') for x in ln.split("\t")]
         p += [""] * (5 - len(p))
         if p[0] == "" and p[1] == "":  # пустое имя и метка: смотрим сдвинутые колонки
