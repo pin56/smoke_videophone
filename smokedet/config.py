@@ -68,6 +68,8 @@ class CycleConfig:
     max_elbow_raise: float = 0.15  # локоть выше плеча больше чем на k*scale — рука у головы
     min_face_visible: float = 0.5  # доля кадров паузы с уверенно найденным носом
     max_head_tilt: float = 0.0  # нос поднялся над ушами в паузе больше чем на k*scale — питьё; 0 — отключено
+    split_enter: float = 0.0  # > 0: пауза длиннее max_hold режется на циклы с порогами split_enter/split_exit
+    split_exit: float = 0.0
 
 
 @dataclass
@@ -248,6 +250,8 @@ class RealtimeConfig:
             "cycle.max_hold=8",
             "cycle.near_enter=1.2",
             "cycle.near_exit=1.5",
+            "cycle.split_enter=0.6",
+            "cycle.split_exit=0.9",
             "cycle.phone_ear_ratio=0",
             "cycle.min_wrist_above_elbow=0",
             "cycle.max_wrist_above_mouth=10",

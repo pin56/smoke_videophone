@@ -49,6 +49,8 @@ cycle:
   min_face_visible: 0.5     # доля кадров паузы с уверенно найденным носом (иначе рот ненадёжен)
   max_head_tilt: 0.0        # нос поднялся над ушами в паузе (против отрезка до подхода) больше чем на k*scale —
                             # голова запрокинута, питьё; 0 — отключено: на true/false не разделяет, подбирать на эталоне
+  split_enter: 0.0          # > 0: пауза длиннее max_hold (затяжки слились при ослабленных near_*) режется
+  split_exit: 0.0           # на циклы с порогами split_enter/split_exit; 0 — выключено
 
 verifier:
   enabled: true
@@ -186,6 +188,8 @@ realtime:                   # потоковый режим run_rt.py (smokedet/
     - cycle.max_hold=8  # sm_4: рука у рта ~6 с с начала потока
     - cycle.near_enter=1.2  # клип 5: поза ставит запястье на предплечье, d ≈ 1.1
     - cycle.near_exit=1.5
+    - cycle.split_enter=0.6  # пауза > max_hold режется строгими порогами: клип 1 курит, держа кисть у груди (d ≈ 1),
+    - cycle.split_exit=0.9   # затяжки сливались в один long_hold; покрытие затяжек 64/80 → 77/80
     - cycle.phone_ear_ratio=0  # фильтры позы на кропах 320 теряют true-клипы
     - cycle.min_wrist_above_elbow=0
     - cycle.max_wrist_above_mouth=10
