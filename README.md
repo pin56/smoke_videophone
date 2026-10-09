@@ -221,9 +221,10 @@ python tools/eval_markup.py --run runs/rt/final
 python run_rt.py --inputs runs/rt/all.csv --out runs/cpu/l168 --device cpu \
     --set realtime.det_model=weights/yolo11n_openvino_model --set realtime.pose_model=weights/yolo11m-pose_openvino_model \
     --set realtime.skip_confirmed=true --set appearance.model=ViT-L/14 --set appearance.input_px=168 \
-    --set appearance.tight_scale=0.2 --set appearance.frame_agg=top2 \
-    --set appearance.direct_score=9 --set appearance.rescue_score=9 --set appearance.min_score=0     --set realtime.many_median=3.5
+    --set appearance.direct_score=9 --set appearance.rescue_score=9 --set appearance.min_score=3.5
 ```
+
+Два вида кропа (`tight_scale` 0) и `frame_agg` max — умолчания; то же в `configs/serve_cpu.yaml`.
 
 Перед первым запуском с новым `input_px` — `tools/prepare_weights.py` с теми же `--set` (экспорт IR CLIP).
 Перебор порогов CLIP без пересчёта CLIP — `tools/clip_lab.py` (эмбеддинги всех кадров пауз в банк, затем `score`).
@@ -237,13 +238,29 @@ python run_rt.py --inputs runs/rt/all.csv --out runs/cpu/l168 --device cpu \
 | L/14@224, `skip_confirmed`, `tight_scale` 0.2, top2 | 0.472 | 19/19 | 64/80 | 83 % | 17 | 0.28 / 0.94 |
 | то же + разрез длинной паузы (`cycle.split_*`) | 0.455 | 19/19 | 77/80 | 97 % | 20 | 0.30 / 1.00 |
 | L/14@168, пороги CLIP 9/9/0 | 0.472 | 19/19 | 77/80 | 93 % | 19 | 0.22 / 0.72 |
-| **то же + `many_median` 3.5 (команда выше)** | **0.472** | **19/19** | **77/80** | **97 %** | **20** | **0.22 / 0.72** |
+| то же + `many_median` 3.5 | 0.472 | 19/19 | 77/80 | 97 % | 20 | 0.22 / 0.72 |
 
-На наборе студентов (17 клипов с курением `smoke1..17`, разметка `students_gt.csv`, проверка разметки —
-`tools/label_server.py --data data/labeling/students`) `many_median` 3.5 поднимает F1 0.460 → 0.489, затяжки
-71/302 → 152/302, время 22 → 49 %: у долгого курения сигарета видна средне в большинстве пауз, и правило
-`many_cycles` без медианы отбрасывало такие события. Длительность webm считается по декодированным кадрам
-(`CAP_PROP_FRAME_COUNT` в webm завышен в десятки раз).
+Общий набор (51 клип: старые true/false и студенты `smoke1..17`, эталон `rasmetka_gt.csv` с листами
+`rasmetka_sheets.md`), повтор кэша `runs/dataset/l168` с CLIP OpenVINO (`tools/tune_rt.py`); пороги подобраны по
+банку `tools/clip_lab.py` на нём же:
+
+| вариант | TP | FP | F1 | true | затяжек | FP в false |
+|---|---|---|---|---|---|---|
+| `tight_scale` 0.2, top2, `min_score` 0.5 (прежний профиль без `many_median`) | 35 | 89 | 0.429 | 21/22 | 125/129 | 54 |
+| то же, `min_score` 2 | 35 | 65 | 0.504 | 21/22 | 125/129 | 37 |
+| **два вида, max, `min_score` 3.5 (команда выше)** | **34** | **57** | **0.523** | **21/22** | **121/129** | **36** |
+| то же, `min_score` 4 | 32 | 49 | 0.533 | 21/22 | 120/129 | 32 |
+
+По событиям с метками пользователя (банк): курящих 52 → 50 (у двух начало сдвинулось на 20 с; потеряны
+`12_38_57` трек 15 и `4` трек 1 — время второго перекрыто другим событием), ложных 82 → 51, из них имитаций
+студентов 50 → 27. Не помогли: наборы фраз ext/cctv/core,
+логрегрессия по эмбеддингам, вычитание кадра покоя и оценка кисти (`lab.diff`/`lab.hand`), `many_min_score`
+10–14, один вид кропа и `mean` по кадрам (теряют половину затяжек). Студенты имитируют курение — на 168 px без
+сигареты в кадре их не отличить.
+
+`many_median` из профиля убран: прирост на студентах (F1 0.460 → 0.489) был по черновой разметке
+`students_gt.csv`; по разметке пользователя — +7 FP без курящих, на общем наборе — +16 FP при тех же TP.
+Длительность webm считается по декодированным кадрам (`CAP_PROP_FRAME_COUNT` в webm завышен в десятки раз).
 
 CLIP L/14 на CPU: 43.6 мс на кроп при 224 px, 24.6 — при 168, 16.9 — при 140 (140 px — 18/19 при `min_score` 0).
 Хуже по качеству при той же цене: ViT-B/32, B/16, MobileCLIP2-S2/S4/B и SigLIP2-B/16 (`appearance.model=oc:…`,

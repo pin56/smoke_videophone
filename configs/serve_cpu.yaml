@@ -6,8 +6,7 @@ realtime:
   det_model: weights/yolo11n_openvino_model
   pose_model: weights/yolo11m-pose_openvino_model
   skip_confirmed: true      # CLIP новых циклов уже подтверждённого события не считается (на эталоне без потерь)
-  many_median: 3.5          # долгое курение, где сигарета видна средне (студенты: F1 0.460 → 0.489, затяжки 71 → 152 из 302)
-  rule_overrides:           # как в configs/default.yaml, но appearance.min_score 0 (пороги CLIP 9/9/0 под вход 168 px)
+  rule_overrides:           # как в configs/default.yaml, но appearance.min_score 3.5 (два вида кропа, max — README, «На CPU»)
     - episode.min_cycles=1
     - episode.confidence_threshold=0.1
     - cycle.min_hold=0.2
@@ -21,11 +20,11 @@ realtime:
     - cycle.max_wrist_above_mouth=10
     - cycle.max_elbow_raise=10
     - cycle.min_face_visible=0
-    - appearance.min_score=0
+    - appearance.min_score=3.5
 appearance:
   model: ViT-L/14           # вход 168 px: позиции ViT интерполируются, кропы «рот + кисть» мелкие (README, «На CPU»)
   input_px: 168
-  tight_scale: 0.2
-  frame_agg: top2
+  tight_scale: 0            # без тесного кропа и с max: общий набор FP 89 → 57 (с min_score 3.5), 2 кропа на кадр вместо 3
+  frame_agg: max
   direct_score: 9
   rescue_score: 9
