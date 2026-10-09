@@ -38,7 +38,7 @@ RT_COLUMNS = [
     *[f"{s}_sec" for s in STAGES], *[f"{s}_load" for s in STAGES], "analysis_sec",
     "decoded_frames", "sparse_frames", "dense_frames", "people", "crops_sparse", "crops_dense", "triggers",
     "jobs", "jobs_reopened", "max_parallel", "dropped_triggers", "scored_cycles", "cycles", "valid_cycles", "events",
-    "alerts", "alerts_withdrawn", "alert_latency_sec",
+    "alerts", "alerts_withdrawn", "alert_latency_sec", "skipped_cycles", "alert_holds",
 ]  # fmt: skip
 
 
@@ -118,6 +118,7 @@ def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: P
         "cycles": n_cycles, "valid_cycles": n_valid, "events": len(records), "alerts": len(lat),
         "alerts_withdrawn": len(run.alerts) - len(lat),
         "alert_latency_sec": round(sum(lat) / len(lat), 2) if lat else "",
+        "skipped_cycles": st.get("skipped_cycles", 0), "alert_holds": st.get("alert_holds", 0),
     }  # fmt: skip
     logging.info("[%s] %.1f с видео за %.1f с (загрузка %.2f), заданий %d, циклов %d (валидных %d), событий %d",
                  clip.clip_id, dur, wall, wall / dur if dur else 0, st.get("jobs", 0), n_cycles, n_valid, len(records))  # fmt: skip
@@ -141,7 +142,7 @@ def main(argv=None) -> int:
         import psutil
 
         psutil.Process().cpu_affinity([int(c) for c in args.cpus.split(",")])
-    limit_threads(cfg.realtime.threads)
+    limit_threads(cfg.realtime.threads, cfg.realtime.ov_precision)
 
     if args.inputs:
         clips = read_inputs_csv(args.inputs)

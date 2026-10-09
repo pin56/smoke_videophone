@@ -68,6 +68,8 @@ class CycleConfig:
     max_elbow_raise: float = 0.15  # локоть выше плеча больше чем на k*scale — рука у головы
     min_face_visible: float = 0.5  # доля кадров паузы с уверенно найденным носом
     max_head_tilt: float = 0.0  # нос поднялся над ушами в паузе больше чем на k*scale — питьё; 0 — отключено
+    split_enter: float = 0.0  # > 0: пауза длиннее max_hold режется на циклы с порогами split_enter/split_exit
+    split_exit: float = 0.0
 
 
 @dataclass
@@ -150,11 +152,14 @@ class AppearanceConfig:
 
     enabled: bool = True
     model: str = "ViT-L/14@336px"  # CLIP (OpenAI); файл весов — в weights_dir
+    input_px: int = 0  # > 0: вход ViT OpenAI CLIP px x px (кратно патчу), позиции сетки интерполируются; 0 — родной
     weights_dir: str = "weights"
     openvino: bool = True  # на CPU визуальная часть через OpenVINO (weights/<файл весов>-visual_openvino, prepare_weights)
     max_frames: int = 8  # кадров паузы на цикл
     mouth_scale: float = 0.35  # сторона узкого кропа «рот + кисть», доля роста человека
     wide_scale: float = 0.7  # сторона широкого кропа (голова, плечи, руки)
+    tight_scale: float = 0.0  # сторона третьего, тесного кропа у рта со словарём узкого (0 — без него)
+    frame_agg: str = "max"  # оценка вида по кадрам паузы: max или top2 (среднее двух лучших — устойчивее к одному кадру)
     min_score: float = 5.0  # цикл с меньшей оценкой без прямого признака — не курение
     direct_score: float = 12.0  # оценка не ниже — у рта сигарета (look): прямой признак при episode.appearance_as_direct
     # цикл, отброшенный верификатором за один из этих предметов, с оценкой не ниже rescue_score снова валиден:
@@ -211,6 +216,9 @@ class RealtimeConfig:
     pose_conf: float = 0.1
     half: bool = True  # FP16, только на CUDA
     threads: int = 0  # потоков инференса на CPU (torch, OpenCV, OpenVINO); 0 — по умолчанию библиотек (все ядра)
+    # точность OpenVINO на CPU: "" — по умолчанию устройства (bf16 на Zen 4/5 и Xeon с AMX/AVX512-BF16),
+    # f32 — как на процессорах без bf16 (N100 и т. п.): замер бюджета дешёвого бокса
+    ov_precision: str = ""
     crop_pad: float = 0.25  # кроп человека: рамка плюс такая доля её сторон с каждой стороны
     match_iou: float = 0.3  # поза в кропе — этого человека, если IoU её рамки с рамкой человека не ниже
     track_iou: float = 0.1  # трекер 1 Гц: пара «трек — рамка» при IoU не ниже...
@@ -229,6 +237,11 @@ class RealtimeConfig:
     objects_per_event: bool = True  # стадия 4: appearance.min_score — по лучшему циклу события, а не по каждому циклу
     many_cycles: int = 5  # стадия 4 по событиям: у события с таким числом оценённых CLIP циклов (0 — нет)...
     many_min_score: float = 10.0  # ...лучшая оценка не ниже: много подходов руки без сигареты — питьё, касание лица
+    many_median: float = 0.0  # ...или медиана оценок не ниже (0 — нет): долгое курение, где сигарета видна средне
+    skip_confirmed: bool = False  # стадия 4: не считать CLIP для новых циклов события, уже подтверждённого оценкой
+    # не ниже many_min_score (решение по событию от них не меняется) — экономия CPU у долгого курения
+    alert_hold: float = 0.0  # с: после тревоги плотная проверка человека продлевается, пока он виден (0 — нет):
+    # затяжки между срабатываниями триггера 1 Гц тоже становятся циклами (покрытие)
     # переопределения общих секций для этого режима, как --set; --set их перекрывает. Подобраны tools/tune_rt.py
     # на 34 клипах (все 19 true с событием), пояснения — в configs/default.yaml
     rule_overrides: List[str] = field(
@@ -239,6 +252,8 @@ class RealtimeConfig:
             "cycle.max_hold=8",
             "cycle.near_enter=1.2",
             "cycle.near_exit=1.5",
+            "cycle.split_enter=0.6",
+            "cycle.split_exit=0.9",
             "cycle.phone_ear_ratio=0",
             "cycle.min_wrist_above_elbow=0",
             "cycle.max_wrist_above_mouth=10",

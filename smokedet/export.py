@@ -101,8 +101,8 @@ def git_commit(repo: Path) -> Optional[str]:
     """SHA HEAD; суффикс -dirty — только при изменениях в отслеживаемых файлах (видео, runs/ и т. п. не в счёт)."""
     try:
         sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
-        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo, capture_output=True,
-                               text=True, check=True)  # fmt: skip
+        dirty = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], cwd=repo,
+                               capture_output=True, text=True, check=True)  # fmt: skip
         return sha.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
     except Exception:
         return None

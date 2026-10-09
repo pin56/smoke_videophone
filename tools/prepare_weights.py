@@ -57,15 +57,12 @@ def main(argv=None) -> int:
         return 1
     print(f"словарь верификатора: {baked} ({'уже был' if not v.clip_used else 'запечён сейчас'}): {file_sha256(str(baked))}")
 
-    import clip
+    from smokedet.appearance import ClipEncoder, export_openvino
 
-    from smokedet.appearance import export_openvino, weights_path
-
-    wdir = project_path(cfg.appearance.weights_dir)
-    model, _ = clip.load(cfg.appearance.model, device="cpu", download_root=wdir)  # скачивает недостающий файл
-    print(f"CLIP внешнего вида {cfg.appearance.model}: {file_sha256(weights_path(cfg.appearance.model, wdir))}")
+    enc = ClipEncoder(cfg.appearance, "cpu", project_path(cfg.appearance.weights_dir))  # скачивает недостающие веса
+    print(f"CLIP внешнего вида {cfg.appearance.model}: {file_sha256(enc.weights)}")
     if cfg.appearance.openvino:
-        print(f"CLIP для CPU (OpenVINO): {export_openvino(model, weights_path(cfg.appearance.model, wdir))}")
+        print(f"CLIP для CPU (OpenVINO): {export_openvino(enc.model, enc.weights, enc.res, enc.px)}")
     return 0
 
 

@@ -108,28 +108,85 @@ def weights_path(model: str, weights_dir: str) -> str:
     return str(Path(weights_dir) / Path(url).name) if url else model
 
 
-def openvino_path(weights: str) -> str:
-    """IR визуальной части CLIP (tools/prepare_weights.py) рядом с файлом весов: weights/<файл>-visual_openvino."""
+OPEN_CLIP = "oc:"  # appearance.model «oc:<архитектура>/<тег>» — open_clip (MobileCLIP2, SigLIP2), иначе OpenAI CLIP
+
+
+def load_clip(model: str, device: str, weights_dir: str, px: int = 0):
+    """CLIP по appearance.model -> (модель, предобработка PIL, токенизатор, файл весов). Веса open_clip скачиваются
+    в weights_dir; ветви MobileOne/FastViT у MobileCLIP сливаются (timm reparameterize_model): быстрее, ответ тот же.
+    px > 0 — вход ViT OpenAI CLIP px x px (resize_vit)."""
+    if not model.startswith(OPEN_CLIP):
+        import clip
+
+        m, pre = clip.load(model, device=device, download_root=weights_dir)
+        if px and px != m.visual.input_resolution:
+            m, pre = resize_vit(m, px), clip.clip._transform(px)
+        return m, pre, clip.tokenize, weights_path(model, weights_dir)
+    if px:
+        raise ValueError("appearance.input_px — только для OpenAI CLIP")
+    import open_clip
+    from open_clip.pretrained import download_pretrained, get_pretrained_cfg
+    from timm.utils import reparameterize_model
+
+    arch, tag = model[len(OPEN_CLIP):].split("/", 1)
+    m, _, pre = open_clip.create_model_and_transforms(arch, pretrained=tag, cache_dir=weights_dir, device=device)
+    m = reparameterize_model(m.eval())
+    weights = str(download_pretrained(get_pretrained_cfg(arch, tag), cache_dir=weights_dir))
+    return m, pre, open_clip.get_tokenizer(arch), weights
+
+
+def resize_vit(model, px: int):
+    """ViT OpenAI CLIP на вход px x px: позиционные векторы сетки патчей интерполируются бикубически. Кропы рта на
+    CCTV — десятки пикселей, родной вход их только растягивает, а цена ViT растёт с числом патчей."""
+    import torch
+
+    v = model.visual
+    patch = v.conv1.kernel_size[0]
+    if px % patch:
+        raise ValueError(f"appearance.input_px={px} не кратно патчу {patch}")
+    pe = v.positional_embedding.data
+    g0, g1 = int(round((pe.shape[0] - 1) ** 0.5)), px // patch
+    grid = pe[1:].float().reshape(1, g0, g0, -1).permute(0, 3, 1, 2)
+    grid = torch.nn.functional.interpolate(grid, size=(g1, g1), mode="bicubic", align_corners=False)
+    grid = grid.permute(0, 2, 3, 1).reshape(g1 * g1, -1).to(pe.dtype)
+    v.positional_embedding = torch.nn.Parameter(torch.cat([pe[:1], grid]))
+    v.input_resolution = px
+    return model
+
+
+def openvino_path(weights: str, px: int = 0) -> str:
+    """IR визуальной части CLIP (tools/prepare_weights.py) рядом с файлом весов: weights/<файл>-visual_openvino
+    (при appearance.input_px — <файл>-visual<px>_openvino)."""
     p = Path(weights)
-    return str(p.with_name(p.stem + "-visual_openvino") / "model.xml")
+    return str(p.with_name(f"{p.stem}-visual{px or ''}_openvino") / "model.xml")
 
 
-def export_openvino(model, weights: str) -> str:
-    """Визуальная часть загруженной clip.load модели -> IR OpenVINO (веса f32, батч любой); путь к model.xml."""
+def export_openvino(model, weights: str, res: int, px: int = 0) -> str:
+    """Визуальная часть модели load_clip (вход res x res; px — appearance.input_px) -> IR OpenVINO (веса f32, батч
+    любой); путь к model.xml."""
     import openvino as ov
     import torch
 
-    out = openvino_path(weights)
+    out = openvino_path(weights, px)
     if not Path(out).exists():
-        visual = model.visual.float().eval()
-        r = visual.input_resolution
+        visual, r = model.visual.float().eval(), res
         ov.save_model(ov.convert_model(visual, example_input=torch.zeros(1, 3, r, r), input=[(-1, 3, r, r)]), out,
                       compress_to_fp16=False)  # fmt: skip
     return out
 
 
-def cycle_score(view_scores: Sequence[np.ndarray]) -> float:
-    """Сумма по видам кропа максимума оценки по кадрам."""
+def view_plan(cfg: AppearanceConfig) -> List[Tuple[float, int]]:
+    """Виды кропа: (сторона, доля роста; словарь 0 — узкий, 1 — широкий)."""
+    views = [(cfg.mouth_scale, 0), (cfg.wide_scale, 1)]
+    return views + [(cfg.tight_scale, 0)] if cfg.tight_scale > 0 else views
+
+
+def cycle_score(view_scores: Sequence[np.ndarray], agg: str = "max") -> float:
+    """Сумма по видам кропа оценки по кадрам: максимум (max) или среднее двух лучших (top2)."""
+    if agg == "top2":
+        return float(sum(np.sort(s)[-2:].mean() for s in view_scores))
+    if agg != "max":
+        raise ValueError(f"appearance.frame_agg: {agg}")
     return float(sum(np.max(s) for s in view_scores))
 
 
@@ -163,17 +220,17 @@ class ClipEncoder:
     в bf16): CLIP-L/336 ~100 мс на кроп против ~650 у torch, косинус векторов с torch >= 0.998."""
 
     def __init__(self, cfg: AppearanceConfig, device: str, weights_dir: str):
-        import clip
         import torch
         from PIL import Image
 
         self.torch, self.Image = torch, Image
         self.device = f"cuda:{device}" if device.isdigit() else device
-        self.weights = weights_path(cfg.model, weights_dir)
-        self.model, self.preprocess = clip.load(cfg.model, device=self.device, download_root=weights_dir)
+        self.px = cfg.input_px
+        self.model, self.preprocess, tokenize, self.weights = load_clip(cfg.model, self.device, weights_dir, self.px)
         self.model.eval()
+        self.res = int(self.preprocess(Image.new("RGB", (8, 8))).shape[-1])
         self.visual = None
-        ir = openvino_path(self.weights)
+        ir = openvino_path(self.weights, self.px)
         if self.device == "cpu" and cfg.openvino:
             if Path(ir).exists():
                 import openvino as ov
@@ -184,12 +241,13 @@ class ClipEncoder:
         self.npos, self.text = [], []
         with torch.no_grad():
             for pos, neg in (MOUTH_PROMPTS, WIDE_PROMPTS):
-                t = self.model.encode_text(clip.tokenize(pos + neg).to(self.device)).float()
+                t = self.model.encode_text(tokenize(pos + neg).to(self.device)).float()
                 self.text.append(t / t.norm(dim=-1, keepdim=True))
                 self.npos.append(len(pos))
         self.scale = float(self.model.logit_scale.detach().exp())
 
-    def __call__(self, crops: List[np.ndarray], view: int) -> np.ndarray:
+    def embed(self, crops: List[np.ndarray]):
+        """Кропы BGR -> нормированные векторы изображений (torch, float32)."""
         torch = self.torch
         x = torch.stack([self.preprocess(self.Image.fromarray(np.ascontiguousarray(c[:, :, ::-1]))) for c in crops])
         with torch.no_grad():
@@ -197,7 +255,12 @@ class ClipEncoder:
                 e = torch.from_numpy(self.visual(x.numpy())[0]).float()
             else:
                 e = self.model.encode_image(x.to(self.device)).float()
-            e = e / e.norm(dim=-1, keepdim=True)
+        return e / e.norm(dim=-1, keepdim=True)
+
+    def __call__(self, crops: List[np.ndarray], view: int) -> np.ndarray:
+        torch = self.torch
+        e = self.embed(crops)
+        with torch.no_grad():
             lg = self.scale * e @ self.text[view].T
             n = self.npos[view]
             s = torch.logsumexp(lg[:, :n], dim=1) - torch.logsumexp(lg[:, n:], dim=1)
@@ -239,7 +302,8 @@ class AppearanceScorer:
 
     @staticmethod
     def _key(clip_id: str, c: Cycle, cfg: AppearanceConfig, digest: str) -> tuple:
-        params = (cfg.model, cfg.max_frames, cfg.mouth_scale, cfg.wide_scale)
+        params = (cfg.model, cfg.input_px, cfg.max_frames, cfg.mouth_scale, cfg.wide_scale, cfg.tight_scale,
+                  cfg.frame_agg)  # fmt: skip
         return clip_id, digest, c.track_id, round(c.start, 3), round(c.hold_start, 3), round(c.hold_end, 3), params
 
     def score(
@@ -279,7 +343,7 @@ class AppearanceScorer:
     ) -> List[float]:
         """Кадры всех циклов читаются за один проход по возрастанию номера (как в vapor.py); кропы цикла
         оцениваются, как только прочитан его последний кадр. nan — ни один кадр не прочитан."""
-        scales = (cfg.mouth_scale, cfg.wide_scale)
+        views = view_plan(cfg)
         plans = []
         need: Dict[int, List[Tuple[int, int]]] = defaultdict(list)  # кадр -> [(номер цикла, номер кропа)]
         times: Dict[int, float] = {}
@@ -292,7 +356,7 @@ class AppearanceScorer:
             for j, (k, f) in enumerate(zip(ks, frames)):
                 need[f].append((i, j))
                 times[f] = float(sig.t[k])
-        crops: List[List[List[np.ndarray]]] = [[[] for _ in scales] for _ in todo]
+        crops: List[List[List[np.ndarray]]] = [[[] for _ in views] for _ in todo]
         results = [float("nan")] * len(todo)
         with FrameReader(video_path, synthetic_from=synthetic_from) as reader:
             for f in sorted(need):
@@ -301,9 +365,10 @@ class AppearanceScorer:
                     centers, height, last = plans[i]
                     if frame is not None:
                         cx, cy = centers[j]
-                        for v, s in enumerate(scales):
+                        for v, (s, _) in enumerate(views):
                             crops[i][v].append(square_crop(frame, cx, cy, s * height))
                     if f == last and crops[i][0]:
-                        results[i] = cycle_score([encoder(crops[i][v], v) for v in range(len(scales))])
-                        crops[i] = [[] for _ in scales]
+                        results[i] = cycle_score([encoder(crops[i][v], tv) for v, (_, tv) in enumerate(views)],
+                                                 cfg.frame_agg)  # fmt: skip
+                        crops[i] = [[] for _ in views]
         return results

@@ -490,3 +490,26 @@ def test_vapor_makes_single_puff_an_event():
 def test_refine_model_path():
     assert refine_model_path("weights/yolo11m-pose.pt") == "weights/yolo11m-pose.pt"
     assert Path(refine_model_path("weights/yolo11m-pose-fp16-dyn1280.engine")) == Path("weights/yolo11m-pose.pt")
+
+
+def _chest_rest(total=30.0, open_end=False):
+    """Кисть между затяжками у груди (d = 1.0), затяжки в 5, 12, 19 с; до 2 с и после 26 с (если не open_end) — далеко."""
+    t = np.arange(0, total, 1 / FPS)
+    d = np.where((t < 2) | ((t > 26) & (not open_end)), 2.0, 1.0)
+    for s in (5, 12, 19):
+        d[(t >= s) & (t < s + 1.5)] = 0.3
+    return make_signal(d)
+
+
+def test_split_long_hold():
+    # ослабленные пороги режима (near_enter 1.2, near_exit 1.5): вся сцена — одна пауза, long_hold
+    loose = CycleConfig(near_enter=1.2, near_exit=1.5, max_hold=8.0)
+    cycles = detect_cycles(_chest_rest(), loose)
+    assert len(cycles) == 1 and "long_hold" in cycles[0].reject_reason
+    split = CycleConfig(near_enter=1.2, near_exit=1.5, max_hold=8.0, split_enter=0.6, split_exit=0.9)
+    cycles = detect_cycles(_chest_rest(), split)
+    assert [round(c.hold_start) for c in cycles] == [5, 12, 19]
+    assert all(c.valid for c in cycles)
+    # пауза ещё не закрыта (поток): законченные затяжки внутри неё уже видны
+    cycles = detect_cycles(_chest_rest(open_end=True), split)
+    assert [round(c.hold_start) for c in cycles] == [5, 12, 19]

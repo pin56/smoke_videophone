@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List
 
 import numpy as np
@@ -214,12 +214,20 @@ def _make_cycle(sig: TrackSignal, cfg: CycleConfig, hs: int, he: int, exit_i: in
 
 
 def detect_cycles(sig: TrackSignal, cfg: CycleConfig) -> List[Cycle]:
+    return _scan(sig, cfg, 0, len(sig.t), 0)
+
+
+def _scan(sig: TrackSignal, cfg: CycleConfig, i0: int, i1: int, prev_end: int) -> List[Cycle]:
+    """Циклы по отсчётам [i0, i1). При cycle.split_enter > 0 пауза длиннее max_hold (закрытая или ещё открытая
+    в конце отсчётов) заменяется циклами, найденными внутри неё со строгими порогами split_enter/split_exit: у
+    крупного курящего кисть между затяжками лежит у груди (d ≈ 1), при ослабленных near_enter/near_exit все
+    затяжки сливаются в одну паузу на десятки секунд и отбрасываются как long_hold."""
     t, d = sig.t, sig.d
+    split = cfg.split_enter > 0
     cycles: List[Cycle] = []
     near = False
-    hs = last_near = 0
-    prev_end = 0
-    for i in range(len(t)):
+    hs = last_near = i0
+    for i in range(i0, i1):
         di = d[i]
         if np.isnan(di):
             if near and t[i] - t[last_near] > cfg.max_missing:
@@ -230,9 +238,17 @@ def detect_cycles(sig: TrackSignal, cfg: CycleConfig) -> List[Cycle]:
                 near, hs, last_near = True, i, i
         elif di > cfg.near_exit:
             cycle, end_i = _make_cycle(sig, cfg, hs, last_near, i, prev_end)
-            cycles.append(cycle)
+            sub = _split(sig, cfg, hs, i, prev_end) if split and "long_hold" in cycle.reject_reason.split(",") else []
+            cycles.extend(sub or [cycle])
             prev_end = end_i
             near = False
         else:
             last_near = i
+    if split and near and t[last_near] - t[hs] > cfg.max_hold:
+        cycles.extend(_split(sig, cfg, hs, i1, prev_end))  # пауза ещё не закрыта: законченные затяжки внутри неё
     return cycles
+
+
+def _split(sig: TrackSignal, cfg: CycleConfig, i0: int, i1: int, prev_end: int) -> List[Cycle]:
+    strict = replace(cfg, near_enter=cfg.split_enter, near_exit=cfg.split_exit, split_enter=0.0)
+    return _scan(sig, strict, i0, i1, prev_end)

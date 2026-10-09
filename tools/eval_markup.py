@@ -194,7 +194,8 @@ def coverage(g: ClipGT, preds: List[dict]) -> Tuple[int, float, float]:
     предсказаний (из всех секунд эпизодов). Событийная метрика засчитывает эпизод за пересечение в 1 с, даже если
     человек курит минуту, а предсказание — одна затяжка: покрытие это показывает."""
     iv = [(float(r["start_sec"]), float(r["end_sec"])) for r in preds]
-    hit = sum(1 for a, b in g.marks if any(min(b, e) > max(a, s) for s, e in iv))
+    # >=: у отметки-точки (подъём = затяжка = опускание) длина 0, строгое неравенство её никогда не засчитало бы
+    hit = sum(1 for a, b in g.marks if any(min(b, e) >= max(a, s) for s, e in iv))
     eps = [(s, e) for s, e, _ in g.episodes]
     inside = [(max(s, a), min(e, b)) for s, e in eps for a, b in iv if min(e, b) > max(s, a)]
     return hit, union_length(inside), union_length(eps)

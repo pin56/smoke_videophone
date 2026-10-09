@@ -1,10 +1,12 @@
 """Оценка внешнего вида цикла (appearance.py) без CLIP: кодировщик подменён оценкой по яркости кропа."""
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from test_logic import make_signal, puffs
 
 from smokedet import appearance
-from smokedet.appearance import PAD_VALUE, AppearanceScorer, cycle_score, plan_frames, square_crop
+from smokedet.appearance import PAD_VALUE, AppearanceScorer, cycle_score, plan_frames, square_crop, view_plan
 from smokedet.config import AppearanceConfig, CycleConfig, EpisodeConfig
 from smokedet.cycles import detect_cycles
 from smokedet.episodes import build_events
@@ -30,6 +32,15 @@ def test_plan_frames_inside_hold():
 
 def test_cycle_score_sums_view_maxima():
     assert cycle_score([np.array([1.0, 3.0]), np.array([-2.0, 0.5])]) == pytest.approx(3.5)
+
+
+def test_cycle_score_top2_and_tight_view():
+    # top2 — среднее двух лучших кадров вида: один случайно высокий кадр не решает
+    assert cycle_score([np.array([1.0, 3.0, 9.0]), np.array([0.5])], "top2") == pytest.approx(6.0 + 0.5)
+    with pytest.raises(ValueError):
+        cycle_score([np.array([1.0])], "median")
+    assert view_plan(AppearanceConfig()) == [(0.35, 0), (0.7, 1)]
+    assert view_plan(AppearanceConfig(tight_scale=0.2)) == [(0.35, 0), (0.7, 1), (0.2, 0)]  # тесный — словарь узкого
 
 
 def _video(path, level, seconds=12.0, fps=30.0):
@@ -126,3 +137,19 @@ def test_scorer_without_model_keeps_cycles(monkeypatch, tmp_path):
     assert cycles[0].valid and np.isnan(cycles[0].appearance)
     info = scorer.describe(AppearanceConfig())
     assert not info["available"] and "нет весов" in info["error"]
+
+
+def test_resize_vit_interpolates_positions():
+    import torch
+
+    v = SimpleNamespace(conv1=torch.nn.Conv2d(3, 8, 14, 14), input_resolution=224)
+    grid = torch.arange(16.0).repeat(16, 1)  # позиция растёт слева направо
+    v.positional_embedding = torch.nn.Parameter(torch.cat([torch.full((1, 8), -1.0), grid.reshape(256, 1).repeat(1, 8)]))
+    appearance.resize_vit(SimpleNamespace(visual=v), 168)
+    pe = v.positional_embedding.data
+    assert pe.shape == (1 + 12 * 12, 8) and v.input_resolution == 168
+    assert torch.equal(pe[0], torch.full((8,), -1.0))  # вектор класса не трогается
+    row = pe[1:13, 0]
+    assert bool((row[1:] > row[:-1]).all())  # порядок позиций сохранён
+    with pytest.raises(ValueError):
+        appearance.resize_vit(SimpleNamespace(visual=v), 150)

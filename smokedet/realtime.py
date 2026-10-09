@@ -34,7 +34,8 @@ import cv2
 import numpy as np
 import yaml
 
-from .appearance import AppearanceScorer, apply_score, crop_geometry, cycle_score, plan_frames, rescuable, square_crop
+from .appearance import (AppearanceScorer, apply_score, crop_geometry, cycle_score, plan_frames, rescuable, square_crop,
+                         view_plan)
 from .config import Config, apply_overrides, config_from_dict, load_config
 from .cycles import Cycle, detect_cycles
 from .episodes import Event, build_events, has_evidence
@@ -48,8 +49,11 @@ log = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
 # поля секции realtime, от которых не зависят отсчёты стадий 1–3 (не входят в ключ кэша, меняются повтором)
-RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", "rule_overrides", "finalize_window",
-               "start_hold", "threads")  # fmt: skip
+RULE_FIELDS = ("objects", "objects_per_event", "many_cycles", "many_min_score", "many_median", "rule_overrides",
+               "finalize_window", "start_hold", "threads", "skip_confirmed")  # fmt: skip
+# поля, добавленные после первых прогонов: в ключ кэша входят, только если отличаются от этих значений (старые кэши
+# остаются действительны)
+HASH_DEFAULTS = {"alert_hold": 0.0, "ov_precision": ""}
 DUP_IOU = 0.8  # два задания плотной проверки с такими рамками — один человек (рамки позы сошлись на нём)
 EPS = 1e-6
 PREFETCH = 8  # кадров плотной сетки, декодированных заранее (поток чтения работает, пока занят GPU)
@@ -521,7 +525,9 @@ def rt_events(cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], c
     без прямого признака отклоняется, если лучшая оценка CLIP его циклов ниже appearance.min_score. Порог по
     каждому циклу (как в run.py) теряет true-клипы: у курящего вдалеке «похожа» на курение одна пауза из нескольких.
     Если CLIP оценил не меньше realtime.many_cycles циклов события, лучшая оценка должна быть не ниже
-    many_min_score: человек много раз подносит руку ко рту, а сигареты не видно ни разу — питьё, касание лица."""
+    many_min_score: человек много раз подносит руку ко рту, а сигареты не видно ни разу — питьё, касание лица.
+    Или медиана оценок не ниже realtime.many_median (если > 0): у долгого курения сигарета видна в большинстве пауз,
+    но ни в одной уверенно, а у питья и касания лица «похожих» пауз одна-две."""
     events = build_events(cycles, signals, cfg.episode)
     rc = cfg.realtime
     if not (rc.objects and rc.objects_per_event):
@@ -533,7 +539,8 @@ def rt_events(cycles: Dict[int, List[Cycle]], signals: Dict[int, TrackSignal], c
         best = max(scores)
         if best < cfg.appearance.min_score:
             e.passed, e.reject_reason = False, f"appearance:{best:.2f}"
-        elif rc.many_cycles > 0 and len(scores) >= rc.many_cycles and best < rc.many_min_score:
+        elif (rc.many_cycles > 0 and len(scores) >= rc.many_cycles and best < rc.many_min_score
+              and not (rc.many_median > 0 and np.median(scores) >= rc.many_median)):
             e.passed, e.reject_reason = False, f"many_cycles:{len(scores)}:{best:.2f}"
     return events
 
@@ -589,19 +596,20 @@ def score_from_memory(job: PersonJob, cycles: List[Cycle], sig: TrackSignal, cfg
     """Оценка CLIP циклов по кропам из памяти задания: кадры и центры — как в AppearanceScorer (plan_frames,
     crop_geometry), кроп вырезается из сохранённого квадрата вместо кадра."""
     ac = cfg.appearance
-    scales = (ac.mouth_scale, ac.wide_scale)
+    plan = view_plan(ac)
     out = []
     for c in cycles:
         ks = plan_frames(sig, c, ac.max_frames)
         centers, height = crop_geometry(sig, c, ks)
-        views: List[List[np.ndarray]] = [[] for _ in scales]
+        views: List[List[np.ndarray]] = [[] for _ in plan]
         for k, (cx, cy) in zip(ks, centers):
             sc = job.crops.get(int(sig.frame_idx[k]))
             if sc is None:
                 continue
-            for v, s in enumerate(scales):
+            for v, (s, _) in enumerate(plan):
                 views[v].append(square_crop(sc.img, (cx - sc.x0) * sc.k, (cy - sc.y0) * sc.k, s * height * sc.k))
-        out.append(cycle_score([encoder(views[v], v) for v in range(len(scales))]) if views[0] else float("nan"))
+        out.append(cycle_score([encoder(views[v], tv) for v, (_, tv) in enumerate(plan)], ac.frame_agg)
+                   if views[0] else float("nan"))  # fmt: skip
     return out
 
 
@@ -626,6 +634,7 @@ def inference_hash(cfg: Config) -> str:
     """Параметры, от которых зависят отсчёты стадий 1–3: секция realtime (кроме правил и стадии 4), geometry и
     tracking (триггер считается по той же геометрии), видео."""
     rc = {f.name: getattr(cfg.realtime, f.name) for f in fields(cfg.realtime) if f.name not in RULE_FIELDS}
+    rc = {k: v for k, v in rc.items() if not (k in HASH_DEFAULTS and v == HASH_DEFAULTS[k])}
     data = {"realtime": rc, "geometry": cfg.to_dict()["geometry"], "tracking": cfg.to_dict()["tracking"],
             "video": cfg.to_dict()["video"]}  # fmt: skip
     return hashlib.sha256(repr(sorted(data.items())).encode()).hexdigest()[:16]
@@ -655,7 +664,16 @@ def load_run(path: Path, key: str) -> Optional[RtRun]:
     run = data.get("run")
     if data.get("version") != CACHE_VERSION or run is None or run.cache_key != key:
         return None
+    fix_frame_count(run)
     return run
+
+
+def fix_frame_count(run: RtRun) -> None:
+    """Число кадров — по декодированным: в webm CAP_PROP_FRAME_COUNT бывает в десятки раз больше настоящего,
+    а от него считаются длительность клипа, load и часы набора."""
+    n = run.stats.get("decoded_frames", 0)
+    if n > 0:
+        run.meta.frame_count = n
 
 
 # ---------------------------------------------------------------- поток
@@ -664,30 +682,33 @@ def load_run(path: Path, key: str) -> Optional[RtRun]:
 STAGES = ("decode_wait", "detect", "pose_sparse", "pose_dense", "cycles", "objects")
 
 
-def limit_threads(n: int) -> None:
-    """Ограничить инференс на CPU n потоками: torch, OpenCV и OpenVINO.
+def limit_threads(n: int, precision: str = "") -> None:
+    """Ограничить инференс на CPU n потоками: torch, OpenCV и OpenVINO; precision — INFERENCE_PRECISION_HINT
+    OpenVINO (f32 — как на процессорах без bf16), пусто — по умолчанию устройства.
 
     ultralytics компилирует модели OpenVINO на устройстве AUTO со своим конфигом без числа потоков (берёт все ядра),
     а настройка одного ov.Core на другие не действует, поэтому Core.compile_model подменяется: AUTO → CPU (AUTO
     не принимает INFERENCE_NUM_THREADS) и подставляется число потоков."""
-    if n <= 0:
+    if n <= 0 and not precision:
         return
-    # OpenMP torch по умолчанию крутит потоки в ожидании (~200 мс): на n ядрах это отнимает их у OpenVINO и декодера
-    os.environ.setdefault("KMP_BLOCKTIME", "0")
-    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
-    import torch
+    if n > 0:
+        # OpenMP torch по умолчанию крутит потоки в ожидании (~200 мс): на n ядрах это отнимает их у OpenVINO и декодера
+        os.environ.setdefault("KMP_BLOCKTIME", "0")
+        os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+        import torch
 
-    torch.set_num_threads(n)
-    cv2.setNumThreads(n)
+        torch.set_num_threads(n)
+        cv2.setNumThreads(n)
     try:
         import openvino as ov
     except ImportError:
         return
     compile_model = ov.Core.compile_model
+    extra = {**({"INFERENCE_NUM_THREADS": n} if n > 0 else {}), **({"INFERENCE_PRECISION_HINT": precision} if precision else {})}
 
     def compile_limited(self, model, device_name=None, config=None, *args, **kwargs):
         if device_name in (None, "CPU", "AUTO"):
-            device_name, config = "CPU", {"INFERENCE_NUM_THREADS": n, **(config or {})}
+            device_name, config = "CPU", {**extra, **(config or {})}
         return compile_model(self, model, device_name, config, *args, **kwargs)
 
     ov.Core.compile_model = compile_limited
@@ -786,9 +807,16 @@ class RealtimeSession:
             if np.isfinite(d) and d < rc.trigger_dist:
                 self.stats["triggers"] += 1
                 if dense:
-                    self.active[tid].until = f.t + rc.dense_after
+                    self.active[tid].until = max(self.active[tid].until, f.t + rc.dense_after)
                 else:
                     triggered.append((d, tid, r))
+            elif rc.alert_hold > 0 and self._alerted.get(tid, (0, 0, False))[2]:
+                # человек с действующей тревогой: плотная проверка, пока виден (после сработавших — по слотам)
+                if dense:
+                    self.active[tid].until = max(self.active[tid].until, f.t + rc.alert_hold)
+                else:
+                    triggered.append((rc.trigger_dist + (d if np.isfinite(d) else 0.0), tid, r))
+                    self.stats["alert_holds"] += 1
             elif not dense:
                 idle.append((d if np.isfinite(d) else math.inf, tid, r))
         self._drop_duplicates(f.t)
@@ -879,9 +907,26 @@ class RealtimeSession:
                 job.crops.clear()
                 del self.active[tid]
 
+    def _confirmed(self, tid: int, c: Cycle) -> bool:
+        """Валидный цикл продолжает событие человека с действующей тревогой, а лучшая оценка CLIP этого события уже
+        не ниже appearance.min_score и many_min_score: его оценка решения по событию не изменит (realtime.skip_confirmed)."""
+        st = self._alerted.get(tid)
+        if not (self.rc.skip_confirmed and c.valid and st is not None and st[2]):
+            return False
+        if c.start - st[1] > self.cfg.episode.merge_gap + EPS:
+            return False  # новое событие
+        scores = [x.appearance for j in self.jobs if j.tid == tid for x in j.cycles
+                  if x.valid and np.isfinite(x.appearance) and st[0] - EPS <= x.start <= st[1] + EPS]  # fmt: skip
+        need = max(self.cfg.appearance.min_score, self.rc.many_min_score if self.rc.many_cycles > 0 else -math.inf)
+        return bool(scores) and max(scores) >= need
+
     def _score(self, job: PersonJob, new: List[Cycle], sig: TrackSignal) -> None:
         ac = self.cfg.appearance
         todo = [c for c in new if c.valid or rescuable(c, ac)]
+        skip = [c for c in todo if self._confirmed(job.tid, c)]
+        if skip:
+            todo = [c for c in todo if c not in skip]
+            self.stats["skipped_cycles"] += len(skip)
         if not todo:
             return
         t0 = time.perf_counter()
@@ -986,6 +1031,7 @@ class RealtimeDetector:
         stats["decoded_frames"] = stream_stats.get("decoded_frames", 0)
         run = RtRun(meta=meta, jobs=[j.record() for j in ses.jobs], sparse=dict(ses.sparse), stats=stats,
                     timings=dict(ses.tm), wall_time=wall, alerts=ses.alerts)  # fmt: skip
+        fix_frame_count(run)
         return run, ses.jobs
 
 
