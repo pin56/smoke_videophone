@@ -26,3 +26,10 @@ appearance:
   frame_agg: top2
   direct_score: 9
   rescue_score: 9
+serve:
+  ladder:                   # как в configs/default.yaml, но первой — skip_confirmed (в профиле CPU он в базе)
+    - realtime.skip_confirmed=true
+    - realtime.max_jobs=4
+    - realtime.dense_fps=2.5
+    - realtime.sparse_fps=0.5
+    - appearance.max_frames=4

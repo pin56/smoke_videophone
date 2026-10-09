@@ -292,8 +292,9 @@ def test_server_segments_match_single_session(tmp_path, monkeypatch):
 
 def test_server_fixed_level_applies_ladder(tmp_path, monkeypatch):
     srv, summary = run_server(tmp_path, monkeypatch, level=1)
-    assert all(c.cfg.realtime.dense_fps == 2.5 for c in srv.cams)  # ступень 1 по умолчанию — dense_fps 2.5
-    assert srv.base.realtime.dense_fps == 5.0
+    assert all(c.cfg.realtime.max_jobs == 4 for c in srv.cams)  # ступень 1 по умолчанию — max_jobs 4
+    assert all(c.cfg.realtime.dense_fps == 5.0 for c in srv.cams)
+    assert srv.base.realtime.max_jobs == 12
     assert summary["level_share"] == {"1": 1.0}
 
 

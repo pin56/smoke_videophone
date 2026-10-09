@@ -278,13 +278,14 @@ class ServeConfig:
     util_boost: float = 0.6  # буст (ступень −1) — только при загрузке ниже
     people_hold: float = 10.0  # с: камера с людьми за это время — приоритет 1 (деградирует позже пустой)
     boost: List[str] = field(default_factory=lambda: ["realtime.fill_budget=true"])  # ступень −1: запас на точность
-    # ступени деградации, накопительно; каждая — «секция.ключ=значение[,…]» из полей, которые сессия читает на лету
+    # ступени деградации, накопительно; каждая — «секция.ключ=значение[,…]» из полей, которые сессия читает на лету;
+    # порядок — по цене на эталоне (README, «Сервер на много камер»): max_frames режет затяжки долгого курения
     ladder: List[str] = field(
         default_factory=lambda: [
-            "realtime.dense_fps=2.5",
-            "appearance.max_frames=4",
             "realtime.max_jobs=4",
+            "realtime.dense_fps=2.5",
             "realtime.sparse_fps=0.5",
+            "appearance.max_frames=4",
         ]
     )
     workers: int = 0  # исполнителей на модель (CPU: потоков OpenVINO; 0 — авто: 1 на GPU, ядра / 4 на CPU)
