@@ -7,6 +7,9 @@
 
 ## Как работает
 
+Два режима. Финальный — **потоковый** `run_rt.py` (1 Гц детектор + поза на кропах, плотная проверка людей с рукой
+у рта, CLIP по кропам паузы; раздел «Потоковый режим»). Ниже — офлайн-конвейер `run.py`, из которого он вырос:
+
 ```
 видео → YOLO11-pose + ByteTrack (~10 кадр/с, уточнение позы мелких людей на кропе) + замер света у рта
       → склейка оборванных треков
@@ -54,27 +57,42 @@ source .venv/bin/activate
 uv pip install --python .venv/Scripts/python.exe -r requirements.lock     --extra-index-url https://download.pytorch.org/whl/cu126 --index-strategy unsafe-best-match
 ```
 
-Веса и офлайн-словарь верификатора — **до выезда на объект**, там может не быть интернета:
+Веса в git не входят (ViT-L/14 — 0.9 ГБ). В архиве сдачи `smokedet.zip` веса потокового режима уже лежат в
+`weights/`: `yolo11n.pt`, `yolo11m-pose.pt`, `ViT-L-14.pt` (CLIP OpenAI) и для CPU — `yolo11n_openvino_model/`,
+`yolo11m-pose_openvino_model/`, `ViT-L-14-visual168_openvino/`. Из git — скачать **до выезда на объект** (там может
+не быть интернета):
 
 ```bash
-python tools/prepare_weights.py   # weights/: pose, YOLO-World, COCO-откат yolo11s.pt + словарь *-vocab-<хэш>.pt
+python tools/prepare_weights.py --config configs/serve_gpu.yaml   # GPU: .pt + словарь YOLO-World *-vocab-<хэш>.pt
+python tools/prepare_weights.py --config configs/serve_cpu.yaml   # CPU: то же + IR OpenVINO детектора, позы и CLIP@168
 ```
 
-С запечённым словарём прогону не нужен CLIP. Если поменяли списки классов верификатора — запустите скрипт снова.
+Офлайн-конвейеру (`run.py`) нужны ещё YOLO-World и COCO-откат `yolo11s.pt` (`python tools/prepare_weights.py`). С
+запечённым словарём прогону не нужен CLIP верификатора. Если поменяли списки классов — запустите скрипт снова.
 
 ## Запуск
 
-Один клип:
+Финальный режим — **потоковый** (`run_rt.py`, раздел «Потоковый режим»). Скрытый набор — **одна команда**:
 
 ```bash
-python run.py --input data/clip.mp4 --camera-id cam_fountain --start-time 2026-10-09T12:00:00 \
-    --roi data/roi_fountain.json --out runs/demo --render
+python run_rt.py --inputs data/hidden.csv --out runs/final --config configs/serve_gpu.yaml --render   # GPU (CUDA)
+python run_rt.py --inputs data/hidden.csv --out runs/final --config configs/serve_cpu.yaml --render   # CPU (OpenVINO)
 ```
 
-Набор клипов (скрытый набор — **одна команда**):
+Выход: `predictions.csv/json`, `manifest.json`, `processing_log.csv`, `realtime_log.csv`, `rendered/<clip>.mp4`
+(с `--render`). Один клип или RTSP-поток:
 
 ```bash
-python run.py --inputs data/hidden.csv --out runs/final
+python run_rt.py --input data/clip.mp4 --camera-id cam_fountain --start-time 2026-10-09T12:00:00 \
+    --roi data/roi_fountain.json --out runs/demo --config configs/serve_gpu.yaml --render
+```
+
+Офлайн-конвейер (`run.py`: поза ~10 кадр/с на всём кадре, YOLO-World, вспышка, пар) — для разбора и интерфейса
+повтора, на финальном прогоне не используется:
+
+```bash
+python run.py --input data/clip.mp4 --camera-id cam_fountain --roi data/roi_fountain.json --out runs/demo --render
+python run.py --inputs data/hidden.csv --out runs/offline
 ```
 
 `--workers N` — клипы параллельно, каждый в своём процессе со своими моделями (на GPU с 6 ГБ не нужно: модели двух процессов вместе с CLIP-L занимают 5.6 ГБ, и весь набор true+false идёт 41 мин против 27.5 мин в одном процессе;
@@ -184,6 +202,7 @@ Inter с Google Fonts (без сети — системный шрифт), ви�
 python run_rt.py --input videos/true/1.mp4 --camera-id cam1 --out runs/rt/one      # видео или RTSP
 python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final                      # набор клипов, CSV как у run.py
 python run_rt.py --inputs runs/rt/all.csv --out runs/rt/fast --no-objects          # без стадии 4
+python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final --render             # + rendered/<clip>.mp4 с отметками
 python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache \
     --grid cycle.near_enter=1.0,1.2 --grid appearance.min_score=0,0.5,1             # перебор повтором из кэша
 python tools/eval_markup.py --run runs/rt/final
@@ -334,7 +353,8 @@ python serve.py --emulate 4 --inputs runs/rt/all.csv --mode cpu --out runs/serve
 | `manifest.json` | порог, правила объединения, версия, git-коммит, веса + sha256, лицензии, промпты, оборудование, полный конфиг |
 | `processing_log.csv` | длительность клипа, время по стадиям, `realtime_factor` (>1 — быстрее реального времени) |
 | `debug/<clip>.json` | все циклы (включая отброшенные с причиной: `short_hold`, `long_hold`, `phone_like`, `hand_low`, `hand_above_mouth`, `face_hidden`, `no_approach`, `object:bottle`…) и события (отклонённые — с `reject_reason`, например `objects_in_100%_cycles`) — для разбора ошибок |
-| `rendered/<clip>.mp4` | с `--render`: зона, рамки (зелёная — человек, жёлтая — кисть у рта, красная — событие `SMOKING-LIKE 0.82`) |
+| `rendered/<clip>.mp4` | с `--render` (`run.py` и `run_rt.py`): зона, рамки (зелёная — человек, жёлтая — кисть у рта, красная — событие `SMOKING-LIKE 0.82`), фаза цикла и оценка CLIP; в потоковом режиме рамка держится до следующего отсчёта |
+| `realtime_log.csv` | только `run_rt.py`: нагрузка `load` (время / длительность, ≤ 1 — успевает) по стадиям, тревоги и их задержка |
 | `cache/` | треки; повторный запуск с другими порогами не пересчитывает детекцию |
 
 ## Оценка и подбор порогов
@@ -407,10 +427,25 @@ python tools/label_server.py --data data/labeling/set1 --host 0.0.0.0 --port 876
 
 ## Фиксация результата (9 октября)
 
-1. Подобрать пороги на эталоне (`tune.py`), записать лучшие в `configs/default.yaml`.
+1. Подобрать пороги на эталоне (`tools/tune_rt.py`, `tools/clip_lab.py`), записать лучшие в профиль
+   (`configs/serve_gpu.yaml` / `serve_cpu.yaml`).
 2. Закоммитить код и конфиг (в `manifest.json` попадёт коммит без `-dirty`).
-3. `python run.py --inputs data/hidden.csv --out runs/final` → сдать `manifest.json`, `predictions.csv`, архив с кодом.
+3. `python run_rt.py --inputs data/hidden.csv --out runs/final --config configs/serve_gpu.yaml --render` → сдать
+   `manifest.json`, `predictions.csv`, `processing_log.csv`, `realtime_log.csv`, ролик с отметкой, архив с кодом.
 4. После фиксации порог, постобработку и предсказания не менять.
+
+## Отличия от правил кейса
+
+Правило эпизода финального профиля (`realtime.rule_overrides` в `configs/serve_*.yaml`) отличается от формулировки
+ТЗ. Всё подобрано на эталоне (ручная разметка `rasmetka*.md`, `rasmetka_gt.csv`), скрытый набор не использовался.
+
+| ТЗ | профиль | почему |
+|---|---|---|
+| ≥ 2 цикла за 20 с **или** 1 цикл + прямой признак | 1 цикл + признак CLIP у **каждого** события (`appearance.min_score` 3.5 по лучшему циклу, `objects_per_event`); два цикла без признака — не событие | по позе затяжку не отличить от питья и касания лица (AUC 0.54–0.64), два таких цикла — частый FP; признак CLIP — сигарета или вейп у рта в кропе паузы, роль прямого признака ТЗ. Без него (`--no-objects`) на 34 клипах FP 85 против 48, в false-клипах 37 против 14, при тех же 19/19 true |
+| пауза у рта 0.5–5 с | `cycle.min_hold` 0.2, `max_hold` 8 | плотная проверка — 5 кадр/с, точки позы на кропе шумят: граница паузы плавает на 0.2–0.4 с, долгие затяжки на CCTV сливаются с соседним подходом. Ложные короткие и длинные паузы отсекает CLIP |
+| человек ≥ 80 px | `tracking.min_person_height` 72 | запас на дрожание рамки детектора: человек ростом 80 px на части кадров даёт рамку 72–80 px. Интервалы с людьми ниже 80 px в эталоне — IGNORE, поэтому запас почти не штрафуется |
+
+Объединение циклов одного человека при паузе ≤ 15 с, раздельные события разных людей и поля выхода — как в ТЗ.
 
 ## Скорость (MacBook, Apple Silicon, MPS, кадр 1920×1080, только поза + трекинг)
 
@@ -461,7 +496,8 @@ python -m pytest -q tests
 
 ## Данные, модели, лицензии
 
-- Предобученные веса Ultralytics (YOLO11-pose — COCO; YOLO-World v2 — Objects365/GoldG), лицензия **AGPL-3.0**. Дообучения нет.
+- Предобученные веса Ultralytics (YOLO11 и YOLO11-pose — COCO; YOLO-World v2 — Objects365/GoldG), лицензия
+  **AGPL-3.0**, поэтому и код проекта — AGPL-3.0 (`LICENSE`). CLIP ViT-L/14 (OpenAI) — MIT. Дообучения нет.
 - Промпты верификатора — `verifier.positive_classes` / `negative_classes` / `track_negative_classes` / `track_drink_classes` в конфиге (дублируются в `manifest.json`).
 - Обработка локальная. Исходные записи объекта не публикуются и не коммитятся (`data/`, `*.mp4` в `.gitignore`).
 

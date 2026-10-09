@@ -9,6 +9,7 @@
 Примеры:
     python run_rt.py --input videos/true/1.mp4 --camera-id cam1 --out runs/rt/one
     python run_rt.py --inputs runs/rt/all.csv --out runs/rt/base [--no-objects] [--set realtime.trigger_dist=1.0]
+    python run_rt.py --inputs data/hidden.csv --out runs/final --config configs/serve_gpu.yaml --render
 
 Выход в том же формате, что у run.py (export.PRED_COLUMNS/LOG_COLUMNS), поэтому работают evaluate.py и
 tools/eval_markup.py. realtime_log.csv — время по стадиям и загрузка (время обработки / длительность видео:
@@ -46,12 +47,14 @@ def parse_args(argv=None):
     p.add_argument("--cpus", help="привязать процесс к логическим CPU, например 0,2 (замер бюджета ядер; потоки — realtime.threads)")
     p.add_argument("--objects", action=argparse.BooleanOptionalAction, default=None,
                    help="стадия 4: CLIP по кропам «рот + кисть» (realtime.objects, по умолчанию — из конфига)")
+    p.add_argument("--render", action="store_true", help="сохранить ролик с отметками событий: <out>/rendered/<clip>.mp4")
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш отсчётов стадий 1–3")
     p.add_argument("--cache", help="папка кэша отсчётов (по умолчанию <out>/cache): перебор порогов повтором другого прогона")
     return p.parse_args(argv)
 
 
-def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: Path, cache_dir: Optional[Path]):
+def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: Path, cache_dir: Optional[Path],
+                 render: bool = False):  # fmt: skip
     """Клип: стадии 1–3 (или повтор из кэша) → события → строки predictions/processing_log/realtime_log."""
     key = rt_cache_key(clip.video_path, cfg)
     cache_path = cache_dir / f"{clip.clip_id}_rt.pkl" if cache_dir and cacheable(clip.video_path) else None
@@ -65,7 +68,7 @@ def process_clip(det: RealtimeDetector, cfg: Config, clip: ClipInput, out_dir: P
         run.cache_key = key
         if cache_path:
             save_run(run, cache_path)
-    return clip_outputs(run, jobs, cfg, clip, out_dir, det.device, det.appearance, from_cache)
+    return clip_outputs(run, jobs, cfg, clip, out_dir, det.device, det.appearance, from_cache, render)
 
 
 def main(argv=None) -> int:
@@ -96,7 +99,7 @@ def main(argv=None) -> int:
     all_rows, log_rows, rt_rows = [], [], []
     for i, clip in enumerate(clips, start=1):
         cache_dir = None if args.no_cache else Path(args.cache) if args.cache else out_dir / "cache"
-        records, log_row, rt_row = process_clip(det, cfg, clip, out_dir, cache_dir)
+        records, log_row, rt_row = process_clip(det, cfg, clip, out_dir, cache_dir, args.render)
         all_rows += records
         log_rows.append(log_row)
         rt_rows.append(rt_row)

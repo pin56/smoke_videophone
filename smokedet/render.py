@@ -18,6 +18,7 @@ from .flash import Flash
 from .geometry import TrackSignal
 from .io_video import FrameClock, VideoMeta
 from .roi import Roi
+from .tracking import PersonObs
 
 log = logging.getLogger(__name__)
 
@@ -66,11 +67,21 @@ def render_video(
     title: str,
     start_time: Optional[str] = None,
     flashes: Optional[Dict[int, List[Flash]]] = None,
+    hold: int = 0,
+    others: Optional[Dict[int, List[PersonObs]]] = None,
 ) -> Path:
+    """hold > 0 (потоковый режим: отсчёты не на каждом stride-м кадре) — последняя рамка человека держится hold кадров;
+    others — отсчёты людей вне плотной проверки (только рамка)."""
     by_frame: Dict[int, list] = defaultdict(list)
     for tid, sig in signals.items():
         for i, f in enumerate(sig.frame_idx):
             by_frame[int(f)].append((tid, i))
+    other_by_frame: Dict[int, list] = defaultdict(list)
+    for tid, obs in (others or {}).items():
+        for o in obs:
+            other_by_frame[o.frame_idx].append((tid, o.box))
+    last: Dict[int, tuple] = {}  # tid -> (индекс отсчёта, кадр), при hold
+    last_other: Dict[int, tuple] = {}
     holds = {tid: [(c.hold_start, c.hold_end) for c in cs if c.valid] for tid, cs in cycles.items()}
     lit = {tid: [(f.start, f.end) for f in fs] for tid, fs in (flashes or {}).items()}
     puffs = {tid: [(c.vapor_t, c.vapor_t + 1.0) for c in cs if c.vapor] for tid, cs in cycles.items()}
@@ -91,10 +102,22 @@ def render_video(
         ok, frame = cap.read()
         if not ok:
             break
-        if idx % stride == 0:
-            current = by_frame.get(idx, [])
         t = clock.time(idx, cap.get(cv2.CAP_PROP_POS_MSEC))  # то же время, что у наблюдений трекера
         roi.draw(frame, thickness=thick)
+        if hold:
+            for tid, i in by_frame.get(idx, []):
+                last[tid] = (i, idx)
+            for tid, box in other_by_frame.get(idx, []):
+                last_other[tid] = (box, idx)
+            current = [(tid, i) for tid, (i, f) in last.items() if idx - f <= hold]
+            seen = {tid for tid, _ in current}
+            for tid, (box, f) in last_other.items():
+                if idx - f <= hold and tid not in seen:
+                    x1, y1, x2, y2 = box.astype(int)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), GREEN, thick)
+                    _label(frame, f"id{tid}", (x1, y1 - 2), GREEN, fscale * 0.8, thick)
+        elif idx % stride == 0:
+            current = by_frame.get(idx, [])
         alarms = 0
         for tid, i in current:
             sig = signals[tid]
