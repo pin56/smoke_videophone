@@ -21,8 +21,9 @@ load 0.076 / пик 0.22; CPU с CLIP L/14@168 — 2.4 ядра в средне�
 
 ## Архитектура
 
-Один процесс, общие модели, поток на камеру (подход «общий сервис + планировщик»). Несколько процессов с разбиением
-камер — только если замер покажет упор в GIL.
+Один процесс, общие модели, поток на камеру (подход «общий сервис + планировщик»). Упор одного процесса в GIL
+снимается `--procs P` (`multi.py`): камеры делятся по P процессам, у каждого свои модели, Hub и регулятор, выход
+процессов (`<out>/p<k>`) сливается в общий; на CPU потоки OpenVINO и исполнители делятся поровну.
 
 ```
 CameraSource (поток чтения) ──кадры──▶ Camera (поток: RealtimeSession) ──запросы──▶ Hub (детектор / поза / CLIP)
@@ -41,9 +42,9 @@ CameraSource (поток чтения) ──кадры──▶ Camera (пот�
   исполнитель берёт первый запрос, добирает запросы того же ключа не дольше `wait_ms` и не больше `max_items`,
   вызывает `fn` одним батчем и раздаёт результаты (исключение — каждому запросу). `Hub` собирает детектор, позу и
   CLIP из `RealtimeDetector` и отдаёт сессиям объект с `detect`/`pose` и кодировщик CLIP с тем же интерфейсом
-  (`encoder(crops, view)`, ключ — вид). GPU: один исполнитель на модель. CPU: `serve.ov_streams` исполнителей,
-  OpenVINO компилируется с `NUM_STREAMS` (сейчас `LATENCY` = один поток исполнения), infer request — свой у каждого
-  потока (`OvYolo`, CLIP-IR). Учёт: занятость исполнителя (доля времени в `fn`), средний батч.
+  (`encoder(crops, view)`, ключ — вид). GPU: один исполнитель на модель. CPU: `serve.workers` исполнителей
+  (0 — ядра / 4), OpenVINO компилируется с `THROUGHPUT` и `NUM_STREAMS` = исполнителей, infer request — свой у
+  каждого потока (`OvYolo`, CLIP-IR). Учёт: занятость исполнителя (доля времени в `fn`), средний батч.
 - `control.py` — `Controller`: чистая логика, без моделей и потоков (тестируется сценариями).
 - `server.py` — `Server`: камеры, тревоги, журнал раз в секунду, завершение сегментов (события → строки
   predictions), эмуляция.
@@ -102,13 +103,14 @@ CameraSource (поток чтения) ──кадры──▶ Camera (пот�
 
 Профили — YAML поверх умолчаний (`load_rt_config`), выбираются `--mode`:
 
-- `configs/serve_gpu.yaml` — CUDA, `half`, поза `yolo11m-pose.pt`, детектор `yolo11n.pt`@1280, CLIP L/14 (вход по
-  замеру: 336 или 168), правило как в профиле CPU (`many_median` 3.5, пороги CLIP — по замеру на эталоне).
+- `configs/serve_gpu.yaml` — CUDA, fp32 (FP16 сдвигает точки позы, пороги подобраны в fp32), поза
+  `yolo11m-pose.pt`, детектор `yolo11n.pt`, CLIP L/14@168, правило и пороги CLIP как в профиле CPU.
 - `configs/serve_cpu.yaml` — профиль README «На CPU»: OpenVINO det/pose, CLIP L/14@168 IR, `skip_confirmed`,
   `many_median` 3.5.
 
 Секция `serve` в `config.py`/`default.yaml`: `tick`, `lag_low`, `lag_high`, `lag_max`, `calm_hold`, `util_low`,
-`util_boost`, `boost`, `ladder`, `ov_streams` (0 — авто), `batch_wait_ms`, `max_batch`, `reconnect`.
+`util_boost`, `people_hold`, `boost`, `ladder`, `workers` (0 — авто), `batch_wait_ms`, `max_batch`, `queue_sec`,
+`reconnect`, `decode_threads`.
 
 ## Запуск и выход
 
