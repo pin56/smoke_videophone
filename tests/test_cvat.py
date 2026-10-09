@@ -4,7 +4,7 @@ import pytest
 
 from smokedet.config import Config
 from smokedet.cvat import (
-    CvatTrack, Episode, FrameTime, Mark, Shape, assign_person, build_clip, gt_rows, lerp_boxes, load_marks,
+    CvatTrack, FrameTime, Mark, Shape, assign_person, build_clip, gt_rows, lerp_boxes, load_marks,
     read_cvat, thin_keyframes, write_xml, _iou,
 )  # fmt: skip
 from smokedet.geometry import TrackSignal

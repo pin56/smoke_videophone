@@ -122,7 +122,7 @@ def build_dataset(args):
                 puff = float(r["puff_sec"]) if r["puff_sec"] else (up + down) / 2
                 gt.setdefault(f'{r["folder"]}_{r["video"]}', []).append((r["label"], up, puff, down))
 
-    rows, covered = [], {}
+    rows = []
     for cid, clip in clips.items():
         ts = pipe.track(clip, Path(args.cache))
         an = pipe.analyze(clip, ts)

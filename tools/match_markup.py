@@ -10,7 +10,7 @@ smoke15 т6), отметки — циклы этих треков из data/labe
 rasmetka_sheets.md — курение, которого нет в rasmetka.md: события потокового прогона l168 на старых true-клипах,
 подтверждённые пользователем по листам runs/vlm/true_sheets (2026-10-09), отметки — их циклы.
 """
-import csv, re, sys, collections
+import csv, re, collections
 import unicodedata
 
 ALIAS = {"25_11_6_8_35_37": "2025_11_06_08_35_37", "распитие": "распитие", "распитие (2)": "распитие (2)"}
@@ -75,7 +75,6 @@ def main():
         if lab == "" and p[2] and "курит" in p[2]:
             pass
         prev = name
-        vals = [x for x in p[2:] if x != ""]
         rows.append((name, lab.lower(), p[2:5], ln))
 
     out = []
