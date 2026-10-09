@@ -32,3 +32,21 @@ def test_phase_and_render(tmp_path):
     cap = cv2.VideoCapture(str(out))
     ok, frame = cap.read()
     assert ok and frame.shape == (400, 320, 3) and frame.any()
+
+
+def test_render_hold_others(tmp_path):
+    """Потоковый режим: рамка человека вне проверки (отсчёт 1 Гц) держится hold кадров, потом пропадает."""
+    from smokedet.tracking import PersonObs
+
+    video = tmp_path / "in.mp4"
+    w = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), FPS, (320, 400))
+    for _ in range(20):
+        w.write(np.zeros((400, 320, 3), np.uint8))
+    w.release()
+    meta = VideoMeta(str(video), FPS, 20, 320, 400)
+    obs = PersonObs(0, 0.0, np.array([100.0, 150.0, 200.0, 350.0]), 1.0, np.zeros((17, 3)))
+    out = render_video(meta, 1, tmp_path / "out.mp4", {}, {}, [], Roi.full(), "t", hold=5, others={7: [obs]})
+    cap = cv2.VideoCapture(str(out))
+    frames = [cap.read()[1] for _ in range(10)]
+    green = [int(f[250, 98:103, 1].max()) for f in frames]  # левая сторона рамки
+    assert min(green[:6]) > 120 and max(green[7:]) < 60

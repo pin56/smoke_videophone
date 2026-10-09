@@ -4,6 +4,7 @@ tools/eval_markup.py."""
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import logging
 import time
@@ -26,13 +27,23 @@ RT_COLUMNS = [
 
 
 def clip_outputs(run: RtRun, jobs: Optional[List[PersonJob]], cfg: Config, clip: ClipInput, out_dir: Path, device: str,
-                 scorer=None, from_cache: bool = False):  # fmt: skip
+                 scorer=None, from_cache: bool = False, render: bool = False):  # fmt: skip
     """События клипа по итогу стадий 1–3 (jobs — задания из потока, None — повтор из кэша) → строки
-    predictions/processing_log/realtime_log; debug пишется сразу."""
+    predictions/processing_log/realtime_log; debug пишется сразу; render — ролик rendered/<clip>.mp4."""
     t0 = time.perf_counter()
     roi = Roi.load(clip.roi_path, run.meta.width, run.meta.height)
     cycles, signals, events = analyze(run, cfg, roi, jobs, scorer, clip.clip_id, clip.video_path)
     analysis_sec = time.perf_counter() - t0
+    render_sec = 0.0
+    if render:
+        from .render import render_video
+
+        meta = dataclasses.replace(run.meta, path=clip.video_path)
+        hold = int(meta.fps / max(cfg.realtime.sparse_fps, 0.1)) + 1  # рамка держится до следующего отсчёта 1 Гц
+        path = render_video(meta, 1, out_dir / "rendered" / f"{clip.clip_id}.mp4", signals, cycles, events, roi,
+                            f"{clip.camera_id}/{clip.clip_id}", clip.start_time, hold=hold, others=run.sparse)  # fmt: skip
+        render_sec = time.perf_counter() - t0 - analysis_sec
+        logging.info("[%s] ролик с разметкой: %s", clip.clip_id, path)
     records = event_records(events, clip.camera_id, clip.clip_id)
     write_debug(out_dir, clip.clip_id, cycles, events)
     dbg = out_dir / "debug" / f"{clip.clip_id}_rt.json"
@@ -49,7 +60,7 @@ def clip_outputs(run: RtRun, jobs: Optional[List[PersonJob]], cfg: Config, clip:
         "start_time": clip.start_time or "", "duration_sec": round(dur, 3), "fps": round(meta.fps, 3),
         "width": meta.width, "height": meta.height,
         "processed_frames": st.get("sparse_frames", 0) + st.get("dense_frames", 0),
-        "tracking_sec": round(wall, 2), "analysis_sec": round(analysis_sec, 2), "render_sec": 0.0,
+        "tracking_sec": round(wall, 2), "analysis_sec": round(analysis_sec, 2), "render_sec": round(render_sec, 2),
         "total_sec": round(wall + analysis_sec, 2),
         # как у run.py: во сколько раз быстрее реального времени (загрузка — в realtime_log.csv)
         "realtime_factor": round(dur / (wall + analysis_sec), 2) if wall + analysis_sec > 0 else "",
