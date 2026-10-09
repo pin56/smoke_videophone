@@ -248,7 +248,7 @@ class HubModels:
         return None
 
 
-def run_server(tmp_path, monkeypatch, level, starts=(3.0, 10.0), n=2):
+def run_server(tmp_path, monkeypatch, level, starts=(3.0, 10.0), n=2, names=None, keep_raw=False):
     from smokedet import ov_yolo
     from smokedet.pipeline import ClipInput
     from smokedet.serve.server import Server, emulated_specs
@@ -256,13 +256,15 @@ def run_server(tmp_path, monkeypatch, level, starts=(3.0, 10.0), n=2):
 
     monkeypatch.setattr(ov_yolo, "STREAMS", 0)
     cfg = with_overrides(Config(), ["realtime.objects=false", "serve.workers=2", "serve.tick=0.2"])
-    clips = [ClipInput(f"v{i}.mp4", f"cam{i}", f"clip{i}") for i in range(n)]
-    specs = emulated_specs(clips, {}, n)
+    names = names or [f"clip{i}" for i in range(n)]
+    clips = [ClipInput(f"v{i}.mp4", f"cam{i}", c) for i, c in enumerate(names)]
+    specs = emulated_specs(clips, {}, len(names))
 
     def source(url, *args, **kw):
         return CameraSource(url, *args, cap=FakeCap(750), **kw)  # 30 с
 
-    srv = Server(cfg, specs, tmp_path, HubModels(list(starts)), pace=False, fixed_level=level, source=source)
+    srv = Server(cfg, specs, tmp_path, HubModels(list(starts)), pace=False, fixed_level=level, source=source,
+                 keep_raw=keep_raw)  # fmt: skip
     return srv, srv.run()
 
 
@@ -293,3 +295,37 @@ def test_server_fixed_level_applies_ladder(tmp_path, monkeypatch):
     assert all(c.cfg.realtime.dense_fps == 2.5 for c in srv.cams)  # ступень 1 по умолчанию — dense_fps 2.5
     assert srv.base.realtime.dense_fps == 5.0
     assert summary["level_share"] == {"1": 1.0}
+
+
+def test_split_specs_and_child_overrides():
+    from smokedet.serve.multi import child_overrides, split_specs
+    from smokedet.serve.server import CameraSpec
+
+    specs = [CameraSpec(f"c{i}") for i in range(7)]
+    assert [[s.camera_id for s in g] for g in split_specs(specs, 3)] == [["c0", "c3", "c6"], ["c1", "c4"], ["c2", "c5"]]
+    assert len(split_specs(specs[:2], 4)) == 2  # процессов не больше камер
+    assert child_overrides("gpu", 4, 32) == []
+    assert child_overrides("cpu", 4, 32) == ["realtime.threads=8", "serve.workers=2"]
+
+
+def test_merge_parts_as_one_server(tmp_path, monkeypatch):
+    import csv
+    import json
+
+    from smokedet.serve.multi import merge_parts
+
+    parts = [tmp_path / "p0", tmp_path / "p1"]
+    _, s0 = run_server(parts[0], monkeypatch, 0, names=["a0", "a1"], keep_raw=True)
+    _, s1 = run_server(parts[1], monkeypatch, 0, names=["b0"], keep_raw=True)
+    m = merge_parts(tmp_path, parts)
+    assert m["procs"] == 2 and m["cameras"] == 3 and m["segments"] == 3
+    assert m["events"] == s0["events"] + s1["events"]
+    assert m["wall_sec"] == max(s0["wall_sec"], s1["wall_sec"])
+    assert m["alert_latency_wall"]["n"] == s0["alert_latency_wall"]["n"] + s1["alert_latency_wall"]["n"]
+    with open(tmp_path / "predictions.csv", encoding="utf-8") as f:
+        assert {r["clip_id"] for r in csv.DictReader(f)} == {"a0", "a1", "b0"}
+    with open(tmp_path / "processing_log.csv", encoding="utf-8") as f:
+        assert len(list(csv.DictReader(f))) == 3
+    assert {p.stem for p in (tmp_path / "debug").glob("*.json") if not p.stem.endswith("_rt")} == {"a0", "a1", "b0"}
+    assert len((tmp_path / "alerts.jsonl").read_text(encoding="utf-8").splitlines()) == m["alert_latency_wall"]["n"] + m["alerts_withdrawn"]
+    assert json.loads((tmp_path / "serve_summary.json").read_text(encoding="utf-8"))["level_share"] == {"0": 1.0}

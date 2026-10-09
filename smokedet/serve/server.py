@@ -238,8 +238,9 @@ def percentiles(xs: List[float]) -> dict:
 
 class Server:
     def __init__(self, base: Config, specs: List[CameraSpec], out_dir: Path, models, pace: bool = True,
-                 fixed_level: Optional[int] = None, label: str = "", source=CameraSource):  # fmt: skip
+                 fixed_level: Optional[int] = None, label: str = "", source=CameraSource, keep_raw: bool = False):  # fmt: skip
         self.base, self.out, self.pace, self.fixed, self.label = base, out_dir, pace, fixed_level, label
+        self.keep_raw = keep_raw  # писать serve_raw.json (процесс из --procs)
         self.source = source  # фабрика источника с сигнатурой CameraSource (тесты подставляют свой capture)
         out_dir.mkdir(parents=True, exist_ok=True)
         self.ladder = Ladder(base)
@@ -361,33 +362,58 @@ class Server:
         cfg = self.base
         appearance = self.hub.models.appearance.describe(cfg.appearance) if cfg.realtime.objects else None
         write_manifest(self.out, cfg, self.hub.models.device, None, ROOT, appearance)
-        cam_time = sum(self.level_time.values()) or 1.0
-        g_total = sum(self.g_time.values()) or 1.0
-        live = [a for a in self.alerts if not a.get("withdrawn")]
-        st = self.hub.snapshot()
-        summary = {
-            "label": self.label, "mode": "gpu" if self.gpu else "cpu", "device": self.hub.models.device,
-            "cameras": len(self.cams), "pace": self.pace, "fixed_level": self.fixed, "workers": self.hub.workers,
-            "ladder": cfg.serve.ladder, "boost": cfg.serve.boost,
-            "wall_sec": round(wall, 1), "video_sec": round(sum(r["duration_sec"] for r in self.rt_rows), 1),
-            "segments": len(self.rt_rows), "events": len(self.rows),
-            "cpu_cores": round(cpu / wall, 2) if wall else 0.0,
-            "lag": percentiles(self.tick_lags),
-            "alert_latency_wall": percentiles([a["latency_wall"] for a in live]),
-            "alert_latency_stream": percentiles([a["latency"] for a in live]),
-            "alerts_withdrawn": len(self.alerts) - len(live),
-            "level_share": {str(k): round(v / cam_time, 3) for k, v in sorted(self.level_time.items())},
-            "G_share": {str(k): round(v / g_total, 3) for k, v in sorted(self.g_time.items())},
-            "dropped_dense": sum(c.counts["dropped_dense"] for c in self.cams),
-            "dropped_queue": sum(c.counts["dropped_queue"] for c in self.cams),
-            "decoded_frames": sum(c.counts["decoded_frames"] for c in self.cams),
-            "errors": sum(c.counts["errors"] for c in self.cams),
-            "executors": {k: {"batches": s.batches, "avg_items": round(s.items / s.batches, 2) if s.batches else 0.0,
-                              "busy_share": round(s.busy / (wall * self.hub.execs[k].n_workers), 3) if wall else 0.0}
-                          for k, s in st.items()},  # fmt: skip
-        }
+        raw = self.raw(wall, cpu)
+        if self.keep_raw:
+            (self.out / "serve_raw.json").write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        summary = summarize(raw)
         (self.out / "serve_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
-        log.info("Готово: %d камер, %.0f с, видео %.0f с, задержка тревоги p95 %s с, отставание p95 %s с → %s",
-                 len(self.cams), wall, summary["video_sec"], summary["alert_latency_wall"].get("p95", "—"),
-                 summary["lag"].get("p95", "—"), self.out)  # fmt: skip
+        log_summary(summary, self.out)
         return summary
+
+    def raw(self, wall: float, cpu: float) -> dict:
+        """Сырые итоги прогона: из них summarize считает serve_summary.json, а --procs — сводку по процессам."""
+        cfg, st = self.base, self.hub.snapshot()
+        counts = Counter()
+        for c in self.cams:
+            counts.update({k: c.counts[k] for k in ("dropped_dense", "dropped_queue", "decoded_frames", "errors")})
+        return {
+            "label": self.label, "mode": "gpu" if self.gpu else "cpu", "device": self.hub.models.device,
+            "cameras": len(self.cams), "procs": 1, "pace": self.pace, "fixed_level": self.fixed,
+            "workers": self.hub.workers, "ladder": cfg.serve.ladder, "boost": cfg.serve.boost,
+            "wall": wall, "cpu": cpu, "video_sec": sum(r["duration_sec"] for r in self.rt_rows),
+            "segments": len(self.rt_rows), "events": len(self.rows), "tick_lags": self.tick_lags,
+            "alerts": self.alerts, "level_time": {str(k): v for k, v in self.level_time.items()},
+            "g_time": {str(k): v for k, v in self.g_time.items()}, "counts": dict(counts),
+            "executors": {k: {"batches": s.batches, "items": s.items, "busy": s.busy,
+                              "workers": self.hub.execs[k].n_workers} for k, s in st.items()},
+        }  # fmt: skip
+
+
+def summarize(raw: dict) -> dict:
+    wall = raw["wall"]
+    cam_time = sum(raw["level_time"].values()) or 1.0
+    g_total = sum(raw["g_time"].values()) or 1.0
+    live = [a for a in raw["alerts"] if not a.get("withdrawn")]
+    keys = ("label", "mode", "device", "cameras", "procs", "pace", "fixed_level", "workers", "ladder", "boost")
+    return {
+        **{k: raw[k] for k in keys},
+        "wall_sec": round(wall, 1), "video_sec": round(raw["video_sec"], 1),
+        "segments": raw["segments"], "events": raw["events"],
+        "cpu_cores": round(raw["cpu"] / wall, 2) if wall else 0.0,
+        "lag": percentiles(raw["tick_lags"]),
+        "alert_latency_wall": percentiles([a["latency_wall"] for a in live]),
+        "alert_latency_stream": percentiles([a["latency"] for a in live]),
+        "alerts_withdrawn": len(raw["alerts"]) - len(live),
+        "level_share": {k: round(v / cam_time, 3) for k, v in sorted(raw["level_time"].items(), key=lambda x: int(x[0]))},
+        "G_share": {k: round(v / g_total, 3) for k, v in sorted(raw["g_time"].items(), key=lambda x: int(x[0]))},
+        **{k: raw["counts"].get(k, 0) for k in ("dropped_dense", "dropped_queue", "decoded_frames", "errors")},
+        "executors": {k: {"batches": e["batches"], "avg_items": round(e["items"] / e["batches"], 2) if e["batches"] else 0.0,
+                          "busy_share": round(e["busy"] / (wall * e["workers"]), 3) if wall else 0.0}
+                      for k, e in raw["executors"].items()},
+    }  # fmt: skip
+
+
+def log_summary(summary: dict, out: Path) -> None:
+    log.info("Готово: %d камер, %.0f с, видео %.0f с, задержка тревоги p95 %s с, отставание p95 %s с → %s",
+             summary["cameras"], summary["wall_sec"], summary["video_sec"], summary["alert_latency_wall"].get("p95", "—"),
+             summary["lag"].get("p95", "—"), out)  # fmt: skip

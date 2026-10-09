@@ -9,7 +9,8 @@ CPU через OpenVINO; configs/serve_cpu.yaml). Регулятор держи�
 Примеры:
     python serve.py --cameras cams.csv --mode gpu --out runs/serve            # cams.csv: camera_id,url[,roi]
     python serve.py --emulate 8 --inputs runs/rt/all.csv --mode cpu --out runs/serve/e8 --durations runs/cpu/l168/processing_log.csv
-    python serve.py --emulate 4 --inputs runs/rt/all.csv --mode cpu --out runs/serve/x --no-pace --level 0   # пропускная способность
+    python serve.py --emulate 4 --inputs runs/rt/all.csv --mode cpu --out runs/serve/x --no-pace   # пропускная способность
+    python serve.py --cameras cams.csv --mode gpu --procs 4 --out runs/serve   # 30 камер: 4 процесса по 7–8 камер
 
 Выход: predictions.csv/json, processing_log.csv, realtime_log.csv, debug/ (как у run_rt.py: tools/eval_markup.py),
 alerts.jsonl (тревоги: камера, клип, задержка wall), serve_log.csv (тик регулятора), serve_summary.json (задержки,
@@ -29,6 +30,7 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "threads;1")  # деко�
 from smokedet.io_video import probe_video  # noqa: E402
 from smokedet.pipeline import LOG_FORMAT, ROOT, read_inputs_csv  # noqa: E402
 from smokedet.realtime import RealtimeDetector, limit_threads, load_rt_config  # noqa: E402
+from smokedet.serve.multi import run_multi  # noqa: E402
 from smokedet.serve.server import CameraSpec, Server, emulated_specs  # noqa: E402
 
 
@@ -45,6 +47,8 @@ def parse_args(argv=None):
     p.add_argument("--out", required=True, help="папка результатов")
     p.add_argument("--no-pace", action="store_true", help="файлы читать без темпа реального времени (замер пропускной способности)")
     p.add_argument("--level", type=int, help="постоянная ступень всех камер (регулятор выключен): -1 буст, 0 база, 1..K")
+    p.add_argument("--procs", type=int, default=1, help="процессов с моделями: камеры делятся между ними (потолок одного "
+                   "процесса — GIL; на CPU потоки OpenVINO делятся поровну)")  # fmt: skip
     return p.parse_args(argv)
 
 
@@ -95,9 +99,15 @@ def main(argv=None) -> int:
     if args.no_pace and args.level is None:
         args.level = 0  # без темпа отставание не задержка: регулятор не работает
         logging.info("--no-pace: ступень 0 у всех камер (регулятор выключен)")
+    if args.mode == "gpu":
+        import torch
+
+        if not torch.cuda.is_available():
+            sys.exit("--mode gpu: CUDA недоступна")
+    if args.procs > 1:
+        run_multi(config, overrides, specs, Path(args.out), not args.no_pace, args.level, label, args.procs, args.mode)
+        return 0
     models = RealtimeDetector(cfg)
-    if args.mode == "gpu" and models.device == "cpu":
-        sys.exit("--mode gpu: CUDA недоступна")
     srv = Server(cfg, specs, Path(args.out), models, pace=not args.no_pace, fixed_level=args.level, label=label)
     srv.run()
     return 0
