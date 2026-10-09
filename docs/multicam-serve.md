@@ -1,6 +1,6 @@
 # Сервер на 20–30 камер: режимы GPU/CPU и регулятор нагрузки
 
-Дата: 2026-10-09. Ветка: `worktree-serve` (от main 5a248ad).
+Дата: 2026-10-09.
 
 ## Задача
 
@@ -110,7 +110,7 @@ CameraSource (поток чтения) ──кадры──▶ Camera (пот�
 - `configs/serve_gpu.yaml` — CUDA, fp32 (FP16 сдвигает точки позы, пороги подобраны в fp32), поза
   `yolo11m-pose.pt`, детектор `yolo11n.pt`, CLIP L/14@168, правило и пороги CLIP как в профиле CPU.
 - `configs/serve_cpu.yaml` — профиль README «На CPU»: OpenVINO det/pose, CLIP L/14@168 IR, `skip_confirmed`,
-  `many_median` 3.5.
+  два вида кропа, `frame_agg` max, `appearance.min_score` 3.5.
 
 Секция `serve` в `config.py`/`default.yaml`: `tick`, `lag_low`, `lag_high`, `lag_max`, `calm_hold`, `util_low`,
 `util_boost`, `people_hold`, `boost`, `ladder`, `workers` (0 — авто), `batch_wait_ms`, `max_batch`, `queue_sec`,

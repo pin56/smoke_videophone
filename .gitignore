@@ -31,5 +31,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
-# рабочие копии агентов Claude Code
-.claude/worktrees/
+# рабочие копии и локальные настройки Claude Code
+.claude/
+# журналы, кэши и секреты веб-разметчика (tools/label_server.py)
+*.log
+*.pkl
+.env
+users.txt
+*.secret
+token
+tls/

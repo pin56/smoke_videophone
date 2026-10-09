@@ -4,7 +4,7 @@
 Режимы: --mode gpu (модели на CUDA, декодирование на CPU; профиль configs/serve_gpu.yaml) и --mode cpu (только
 CPU через OpenVINO; configs/serve_cpu.yaml). Регулятор держит отставание обработки в serve.lag_high: при
 перегрузке камеры без людей деградируют первыми (ступени serve.ladder), при запасе включается буст
-(serve.boost). Подробности — smokedet/serve/server.py, docs/superpowers/specs/2026-10-09-multicam-serve-design.md.
+(serve.boost). Подробности — smokedet/serve/server.py, docs/multicam-serve.md.
 
 Примеры:
     python serve.py --cameras cams.csv --mode gpu --out runs/serve            # cams.csv: camera_id,url[,roi]
