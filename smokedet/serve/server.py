@@ -164,10 +164,11 @@ class Camera:
                     continue
                 self._apply_level()
                 lag = time.monotonic() - a.arrival
-                if lag > sc.lag_max:
-                    self.dropping = True
-                elif lag < sc.lag_high:
-                    self.dropping = False
+                if not src.blocking:  # у файла без темпа отставание — очередь чтения впрок, а не задержка
+                    if lag > sc.lag_max:
+                        self.dropping = True
+                    elif lag < sc.lag_high:
+                        self.dropping = False
                 if self.dropping and not a.f.sparse:
                     self.counts["dropped_dense"] += 1
                     continue

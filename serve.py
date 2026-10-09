@@ -92,6 +92,9 @@ def main(argv=None) -> int:
     if len({s.camera_id for s in specs}) != len(specs):
         sys.exit("camera_id должны быть уникальны")
 
+    if args.no_pace and args.level is None:
+        args.level = 0  # без темпа отставание не задержка: регулятор не работает
+        logging.info("--no-pace: ступень 0 у всех камер (регулятор выключен)")
     models = RealtimeDetector(cfg)
     if args.mode == "gpu" and models.device == "cpu":
         sys.exit("--mode gpu: CUDA недоступна")
