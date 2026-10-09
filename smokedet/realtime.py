@@ -44,6 +44,7 @@ from .io_video import FrameClock, VideoMeta, _open, prefetched, probe_video
 from .ov_yolo import OvYolo, is_openvino_dir
 from .roi import Roi, anchor_point
 from .tracking import PersonObs, box_iou, half_kwargs, select_device
+from .weights import ensure_for
 
 log = logging.getLogger(__name__)
 
@@ -1003,6 +1004,7 @@ class RealtimeDetector:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.device = select_device(cfg.detector.device)
+        ensure_for(cfg, self.device)  # недостающие веса — из релиза GitHub (smokedet/weights.py)
         self._detect: Optional[PersonDetector] = None
         self._pose: Optional[CropPose] = None
         self.appearance = AppearanceScorer(self.device, project_path(cfg.appearance.weights_dir))
