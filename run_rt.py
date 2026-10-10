@@ -10,6 +10,7 @@
     python run_rt.py --input videos/true/1.mp4 --camera-id cam1 --out runs/rt/one
     python run_rt.py --inputs runs/rt/all.csv --out runs/rt/base [--no-objects] [--set realtime.trigger_dist=1.0]
     python run_rt.py --inputs data/hidden.csv --out runs/final --config configs/serve_gpu.yaml --render
+    python run_rt.py --inputs data/hidden.csv --out runs/novlm --config configs/serve_gpu.yaml --no-vlm   # без VLM-арбитра
 
 Выход в том же формате, что у run.py (export.PRED_COLUMNS/LOG_COLUMNS), поэтому работают evaluate.py и
 tools/eval_markup.py. realtime_log.csv — время по стадиям и загрузка (время обработки / длительность видео:
@@ -48,6 +49,7 @@ def parse_args(argv=None):
     p.add_argument("--objects", action=argparse.BooleanOptionalAction, default=None,
                    help="стадия 4: CLIP по кропам «рот + кисть» (realtime.objects, по умолчанию — из конфига)")
     p.add_argument("--render", action="store_true", help="сохранить ролик с отметками событий: <out>/rendered/<clip>.mp4")
+    p.add_argument("--vlm", action=argparse.BooleanOptionalAction, default=True, help="VLM-арбитр тревог (по умолчанию включён, vlm.enabled): отказ модели снимает событие; --no-vlm — без него")
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш отсчётов стадий 1–3")
     p.add_argument("--cache", help="папка кэша отсчётов (по умолчанию <out>/cache): перебор порогов повтором другого прогона")
     return p.parse_args(argv)
@@ -76,6 +78,7 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt="%H:%M:%S")
     overrides = list(args.set) + ([f"detector.device={args.device}"] if args.device else [])
     overrides += [] if args.objects is None else [f"realtime.objects={str(args.objects).lower()}"]
+    overrides += ["vlm.enabled=true"] if args.vlm else []
     cfg = load_rt_config(args.config, overrides)
     if args.cpus:
         import psutil

@@ -10,6 +10,7 @@
   --red: #ff4d4f;
   --orange: #ff9f43;
   --cyan: #4cc9f0;
+  --violet: #a78bfa;
   --gray: #7d8796;
   --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
   color-scheme: dark;
@@ -280,3 +281,41 @@ aside { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .calc tr.bad td:last-child { color: var(--red, #ef4444); }
 .clipstats .why { margin-top: 6px; font-size: 11px; color: var(--muted, #94a3b8); }
 .clipstats .why.ev { color: var(--red, #ef4444); }
+
+/* потоковый режим: загрузка, проверка VLM, ожидание потока */
+.upload { cursor: pointer; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); white-space: nowrap; }
+.upload:hover { border-color: #3a4760; }
+.upload.busy { color: var(--cyan); cursor: progress; }
+#drop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 13, 18, 0.85);
+  border: 3px dashed var(--cyan);
+  color: var(--cyan);
+  font-size: 22px;
+  pointer-events: none;
+}
+#alert.check { background: rgba(124, 92, 230, 0.94); }
+#liveWait {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--violet);
+  font-size: 13px;
+  pointer-events: none;
+}
+.verdict.check { color: var(--violet); }
+.chip.check { background: var(--violet); }
+#feed li.alert .txt { color: var(--red); font-weight: 700; }
+#feed li.vlm_send .txt { color: var(--violet); }
+#feed li.vlm .txt { color: var(--violet); font-weight: 700; }
+#feed li.vlm_reject .txt { color: var(--orange); }
+#feed li.withdrawn .txt { color: var(--muted); text-decoration: line-through; }

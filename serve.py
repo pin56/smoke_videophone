@@ -47,6 +47,7 @@ def parse_args(argv=None):
     p.add_argument("--out", required=True, help="папка результатов")
     p.add_argument("--no-pace", action="store_true", help="файлы читать без темпа реального времени (замер пропускной способности)")
     p.add_argument("--level", type=int, help="постоянная ступень всех камер (регулятор выключен): -1 буст, 0 база, 1..K")
+    p.add_argument("--vlm", action=argparse.BooleanOptionalAction, default=True, help="VLM-арбитр тревог (по умолчанию включён, vlm.enabled): отказ модели снимает событие; --no-vlm — без него (одна модель на процесс)")
     p.add_argument("--procs", type=int, default=1, help="процессов с моделями: камеры делятся между ними (потолок одного "
                    "процесса — GIL; на CPU потоки OpenVINO делятся поровну)")  # fmt: skip
     return p.parse_args(argv)
@@ -77,6 +78,7 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt="%H:%M:%S")
     config = args.config or str(ROOT / "configs" / f"serve_{args.mode}.yaml")
     overrides = list(args.set) + (["detector.device=cpu"] if args.mode == "cpu" else [])
+    overrides += ["vlm.enabled=true"] if args.vlm else []
     cfg = load_rt_config(config, overrides)
     limit_threads(cfg.realtime.threads, cfg.realtime.ov_precision)
 

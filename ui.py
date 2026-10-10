@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 """Веб-интерфейс повтора анализа для показа: видео с разметкой и ход анализа синхронно с ним.
 
-Клипы обрабатываются в фоне по очереди (треки берутся из кэша <out>/cache, если он есть — тогда клип готов
-сразу), страница открывается в браузере. Сервер слушает только 127.0.0.1: видео не покидает машину.
+Клипы обрабатываются в фоне по очереди тем же потоковым режимом, что run_rt.py и serve.py (realtime.py, с VLM-арбитром;
+--no-vlm — без него): данные появляются по ходу потока, видео можно смотреть сразу. Видео можно загрузить из браузера —
+оно встаёт в очередь. Отсчёты потока берутся из кэша <out>/cache, если он есть, — тогда клип готов сразу.
+--analyzer pipeline — офлайн-пайплайн run.py (трекинг на каждом кадре → анализ). Сервер слушает только 127.0.0.1:
+видео не покидает машину.
 
 Примеры:
     python ui.py --videos videos
+    python ui.py --videos videos --config configs/serve_gpu.yaml
     python ui.py --input videos/true/1.mp4 --camera-id cam1 --out runs/demo
     python ui.py --inputs data/demo.csv --out runs/check_true --port 8765
 """
@@ -19,6 +23,7 @@ from pathlib import Path
 
 from smokedet.config import load_config
 from smokedet.pipeline import ROOT, ClipInput, Pipeline, read_inputs_csv
+from smokedet.realtime import limit_threads, load_rt_config
 from smokedet.ui.server import ClipStore, UiServer
 
 
@@ -37,6 +42,10 @@ def parse_args(argv=None):
     p.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE", help="переопределить параметр")
     p.add_argument("--device", help="cpu | mps | 0 (по умолчанию auto)")
     p.add_argument("--no-cache", action="store_true", help="не использовать кэш треков")
+    p.add_argument("--analyzer", choices=["realtime", "pipeline"], default="realtime",
+                   help="realtime — потоковый режим (как run_rt.py), pipeline — офлайн-пайплайн run.py")
+    p.add_argument("--vlm", action=argparse.BooleanOptionalAction, default=True,
+                   help="VLM-арбитр тревог в потоковом режиме (по умолчанию включён); --no-vlm — без него")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-browser", action="store_true", help="не открывать браузер")
     return p.parse_args(argv)
@@ -59,7 +68,15 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     overrides = list(args.set) + ([f"detector.device={args.device}"] if args.device else [])
-    cfg = load_config(args.config, overrides)
+    if args.analyzer == "realtime":
+        from smokedet.ui.stream import StreamWorker
+
+        cfg = load_rt_config(args.config, overrides + (["vlm.enabled=true"] if args.vlm else []))
+        limit_threads(cfg.realtime.threads, cfg.realtime.ov_precision)
+        factory = lambda: StreamWorker(cfg)  # noqa: E731
+    else:
+        cfg = load_config(args.config, overrides)
+        factory = lambda: Pipeline(cfg, progress=False)  # noqa: E731
     if args.videos:
         clips = scan_videos(Path(args.videos), args.camera_id)
         if not clips:
@@ -81,7 +98,7 @@ def main(argv=None) -> int:
         sys.exit("clip_id должны быть уникальны")
 
     out_dir = Path(args.out)
-    store = ClipStore(clips, out_dir, lambda: Pipeline(cfg, progress=False), use_cache=not args.no_cache,
+    store = ClipStore(clips, out_dir, factory, use_cache=not args.no_cache,
                       lazy=bool(args.videos))
     try:
         server = UiServer(("127.0.0.1", args.port), store)

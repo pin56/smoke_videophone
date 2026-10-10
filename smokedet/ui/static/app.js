@@ -9,6 +9,7 @@ const C = {
   track: "#36d399",
   hold: "#ffcc33",
   event: "#ff4d4f",
+  check: "#a78bfa",
   off: "#7d8796",
   flash: "#ff9f43",
   vapor: "#bfe3ff",
@@ -26,10 +27,13 @@ const MAX_GAP = 0.45;
 const KP_MIN = 30;
 const D_MAX = 2.0;
 const LEAD = 4;
-const RANK = { off: 0, track: 1, hold: 2, event: 3 };
+const RANK = { off: 0, track: 1, hold: 2, check: 3, event: 4 };
+const LIVE_POLL = 1500;
+const LIVE_LAG = 0.3;
+const UPLOAD_TEXT = "＋ видео";
 const CYCLES = ["цикл", "цикла", "циклов"];
 const EPISODES = ["эпизод", "эпизода", "эпизодов"];
-const STATE = { idle: "не открыт", queued: "в очереди", tracking: "трекинг", analyzing: "анализ…", ready: "готов", error: "ошибка" };
+const STATE = { idle: "не открыт", queued: "в очереди", tracking: "трекинг", streaming: "поток", analyzing: "анализ…", ready: "готов", error: "ошибка" };
 
 const opt = { skel: true, rejects: true, pause: false, all: false };
 let clips = [];
@@ -45,6 +49,9 @@ let dirty = true;
 let feedKey = "";
 let prevT = 0;
 let dragging = false;
+let liveTimer = null;
+let liveHeld = false;
+let dropDepth = 0;
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp = (p, q, a) => p + (q - p) * a;
@@ -79,6 +86,10 @@ function cut(s, n) {
 }
 
 const known = (rt, t) => opt.all || (rt !== null && rt <= t);
+const at = (rt, t) => rt !== null && rt !== undefined && rt <= t;
+
+const checking = (e, t) => !opt.all && at(e.alert_t, t) && !at(e.reveal_t, t);
+const shownUntil = (e) => Math.max(e.end, opt.all || e.reveal_t === null ? e.end : e.reveal_t) + EVENT_TAIL;
 
 function lowerBound(arr, v) {
   let lo = 0;
@@ -173,12 +184,13 @@ function prepare(d) {
 function sampleAt(tr, t) {
   const ts = tr.t;
   const n = ts.length;
-  if (!n || t < ts[0] - MAX_GAP || t > ts[n - 1] + MAX_GAP) return null;
+  const gap = tr.gap || MAX_GAP;
+  if (!n || t < ts[0] - gap || t > ts[n - 1] + gap) return null;
   const lo = Math.max(0, lowerBound(ts, t + 1e-9) - 1);
   const j = Math.min(lo + 1, n - 1);
-  if (ts[lo] <= t && j > lo && ts[j] - ts[lo] <= 2 * MAX_GAP) return { i: lo, j, a: (t - ts[lo]) / (ts[j] - ts[lo]) };
+  if (ts[lo] <= t && j > lo && ts[j] - ts[lo] <= 2 * gap) return { i: lo, j, a: (t - ts[lo]) / (ts[j] - ts[lo]) };
   const k = Math.abs(ts[j] - t) < Math.abs(t - ts[lo]) ? j : lo;
-  return Math.abs(ts[k] - t) <= MAX_GAP ? { i: k, j: k, a: 0 } : null;
+  return Math.abs(ts[k] - t) <= gap ? { i: k, j: k, a: 0 } : null;
 }
 
 function boxAt(tr, s) {
@@ -214,8 +226,10 @@ function dAt(tr, s) {
 }
 
 function stateAt(tr, s, t) {
-  const ev = tr.events.find((e) => e.passed && (opt.all ? e.start : e.reveal_t) <= t && t <= e.end + EVENT_TAIL);
+  const ev = tr.events.find((e) => e.passed && (opt.all ? e.start <= t : at(e.reveal_t, t)) && t <= shownUntil(e));
   if (ev) return { kind: "event", ev };
+  const chk = tr.events.find((e) => checking(e, t));
+  if (chk) return { kind: "check", ev: chk };
   const c = tr.cycles.find((c) => c.hold_start <= t && t <= c.hold_end);
   if (c && tr.valid[s.i]) return { kind: "hold", cycle: c };
   return { kind: tr.valid[s.i] ? "track" : "off" };
@@ -253,7 +267,8 @@ function featureLines(c) {
 function visibleAt(t) {
   const out = [];
   for (const tr of data.tracks) {
-    if (t < tr.t0 - MAX_GAP || t > tr.t1 + MAX_GAP) continue;
+    const gap = tr.gap || MAX_GAP;
+    if (t < tr.t0 - gap || t > tr.t1 + gap) continue;
     const s = sampleAt(tr, t);
     if (s) out.push({ tr, s, st: stateAt(tr, s, t) });
   }
@@ -269,8 +284,9 @@ function ruleState(tr, t) {
     if (i === 0 || !c.joined_prev) moves += 1;
   });
   const direct = done.find((c) => c.direct) || null;
-  const ev = tr.events.find((e) => e.reveal_t <= t && t <= e.end + EVENT_TAIL) || null;
-  return { moves, direct, ev };
+  const ev = tr.events.find((e) => at(e.reveal_t, t) && t <= shownUntil(e)) || null;
+  const chk = tr.events.find((e) => checking(e, t)) || null;
+  return { moves, direct, ev, chk };
 }
 
 function frameRect(w, h) {
@@ -323,7 +339,7 @@ function drawPerson(ctx, X, Y, v, t, maxW, maxH) {
     ctx.globalAlpha = 0.55;
     ctx.setLineDash([4, 4]);
   }
-  ctx.lineWidth = { off: 1, track: 2, hold: 2.5, event: 3.5 }[st.kind];
+  ctx.lineWidth = { off: 1, track: 2, hold: 2.5, check: 3, event: 3.5 }[st.kind];
   if (tr.id === focusId || st.kind === "event") {
     ctx.shadowColor = tr.id === focusId && st.kind !== "event" ? C.roi : col;
     ctx.shadowBlur = 14;
@@ -337,6 +353,7 @@ function drawPerson(ctx, X, Y, v, t, maxW, maxH) {
   }
   let label = `id${tr.id}`;
   if (st.kind === "event") label = `КУРЕНИЕ? ${st.ev.confidence.toFixed(2)} · id${tr.id}`;
+  else if (st.kind === "check") label = `ТРЕВОГА · VLM проверяет… · id${tr.id}`;
   else if (st.kind === "hold") label = `id${tr.id} · рука у рта ${(t - st.cycle.hold_start).toFixed(1)} с`;
   const big = st.kind === "event";
   let ty = by - 3;
@@ -448,6 +465,15 @@ function drawTimeline(t) {
     if (known(f.end, t)) dot(ctx, X(f.start), 20, 3, C.flash);
   }
   for (const e of data.events) {
+    if (checking(e, t)) {
+      const xc = X(e.start);
+      ctx.save();
+      ctx.setLineDash([3, 2]);
+      ctx.strokeStyle = C.check;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(xc + 0.5, 44.5, Math.max(3, X(until(e.end)) - xc), 9);
+      ctx.restore();
+    }
     if (!known(e.reveal_t, t)) continue;
     const x = X(e.start);
     const ww = Math.max(3, X(until(e.end)) - x);
@@ -465,6 +491,25 @@ function drawTimeline(t) {
 
     ctx.fillStyle = "rgba(10, 13, 18, 0.6)";
     ctx.fillRect(X(t), 0, w - X(t), top);
+  }
+  if (data.live) {
+
+    const x0 = X(data.live.processed);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, 0, w - x0, top);
+    ctx.clip();
+    ctx.fillStyle = "rgba(10, 13, 18, 0.55)";
+    ctx.fillRect(x0, 0, w - x0, top);
+    ctx.strokeStyle = "rgba(167, 139, 250, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = x0 - top; x < w; x += 8) {
+      ctx.moveTo(x, top);
+      ctx.lineTo(x + top, 0);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
   const px = X(t);
   ctx.fillStyle = "#fff";
@@ -530,7 +575,7 @@ function drawChart(cv, tr, t, col) {
       pen = false;
       continue;
     }
-    if (i > 0 && tr.t[i] - tr.t[i - 1] > 2 * MAX_GAP) pen = false;
+    if (i > 0 && tr.t[i] - tr.t[i - 1] > 2 * (tr.gap || MAX_GAP)) pen = false;
     if (pen) ctx.lineTo(X(tr.t[i]), Y(d));
     else ctx.moveTo(X(tr.t[i]), Y(d));
     pen = true;
@@ -571,7 +616,7 @@ function updatePeople(t, vis) {
     chip.className = `chip ${v.st.kind}`;
     setText(chip, `id${id}`);
     const r = ruleState(v.tr, t);
-    const what = { event: "эпизод", hold: "рука у рта", track: "наблюдение" }[v.st.kind];
+    const what = { event: "эпизод", check: "тревога, проверка VLM", hold: "рука у рта", track: "наблюдение" }[v.st.kind];
     const ev = r.direct ? ` · ${r.direct.evidence.join(", ")}` : "";
     setText(el.querySelector(".info"), `${what} · движений: ${r.moves}/${data.thresholds.min_cycles}${ev}`);
     drawChart(el.querySelector("canvas"), v.tr, t, C[v.st.kind]);
@@ -595,7 +640,7 @@ function updateRule(t, vis) {
   }
   const th = data.thresholds;
   setText($("ruleWho"), tr ? `· id${tr.id}` : "");
-  const r = tr ? ruleState(tr, t) : { moves: 0, direct: null, ev: null };
+  const r = tr ? ruleState(tr, t) : { moves: 0, direct: null, ev: null, chk: null };
   setCond("condCycles", r.moves >= th.min_cycles, `${Math.min(r.moves, th.min_cycles)}/${th.min_cycles}`);
   setCond("condDirect", !!r.direct, r.direct ? cut(r.direct.evidence.join(", ") || "есть", 22) : "нет");
   let cls = "";
@@ -606,6 +651,9 @@ function updateRule(t, vis) {
   } else if (r.ev) {
     cls = "reject";
     text = `кандидат отклонён: ${r.ev.reason_text || `уверенность ${r.ev.confidence.toFixed(2)} < ${th.confidence_threshold}`}`;
+  } else if (r.chk) {
+    cls = "check";
+    text = "ТРЕВОГА: правило выполнено — VLM проверяет кадры…";
   } else if (r.moves >= th.min_cycles || r.direct) {
     cls = "watch";
     text = "правило выполнено — оценка уверенности…";
@@ -644,19 +692,26 @@ function updateFeed(t) {
   ol.appendChild(frag);
 }
 
-function updateAlert(t) {
+function updateAlert(t, end) {
   const el = $("alert");
+  const late = (e) => end && e.reveal_t !== null && e.reveal_t > t;
   const e = data.passed
-    .filter((e) => (opt.all ? e.start <= t && t <= e.end : e.reveal_t <= t && t <= e.reveal_t + ALERT_FOR))
+    .filter((e) => (opt.all ? e.start <= t && t <= e.end : (at(e.reveal_t, t) && t <= e.reveal_t + ALERT_FOR) || late(e)))
     .pop();
-  if (!e) {
+  const chk = e || end ? null : data.events.find((x) => checking(x, t));
+  if (!e && !chk) {
     el.classList.add("hidden");
     el.dataset.id = "";
     return;
   }
-  if (el.dataset.id !== String(e.id)) {
-    el.dataset.id = String(e.id);
-    el.textContent = `⚠ Эпизод: id${e.track_id} · ${opt.all ? e.basis : e.reveal_basis}`;
+  const key = e ? `ev${e.id}` : `chk${chk.id}`;
+  if (el.dataset.id !== key) {
+    el.dataset.id = key;
+    el.textContent = e
+      ? `⚠ Эпизод: id${e.track_id} · ${opt.all ? e.basis : e.reveal_basis}${!opt.all && e.vlm_text ? ` · ${e.vlm_text}` : ""}` +
+        (!opt.all && late(e) ? ` (ответ в ${fmt(e.reveal_t)} — после конца записи)` : "")
+      : `⏳ Тревога: id${chk.track_id} — VLM проверяет кадры…`;
+    el.classList.toggle("check", !e);
     el.classList.remove("hidden");
     el.style.animation = "none";
     void el.offsetWidth;
@@ -739,18 +794,27 @@ function render(t) {
     return;
   }
   const vis = visibleAt(t);
+  const dur = Math.min(data.clip.duration || Infinity, video.duration || Infinity);
+
+  const end = !data.live && Number.isFinite(dur) && t >= dur - 0.25;
+  const tk = end ? t + 3600 : t;
   drawOverlay(t, vis);
-  drawTimeline(t);
+  drawTimeline(tk);
   updatePeople(t, vis);
   updateRule(t, vis);
   updateCalc(t, vis);
-  updateFeed(t);
-  updateAlert(t);
+  updateFeed(tk);
+  updateAlert(t, end);
   setText($("stPeople"), String(vis.filter((v) => v.st.kind !== "off").length));
-  setText($("stCycles"), String(data.cycles.filter((c) => c.valid && known(c.reveal_t, t)).length));
-  setText($("stEvents"), String(data.passed.filter((e) => known(e.reveal_t, t)).length));
+  setText($("stCycles"), String(data.cycles.filter((c) => c.valid && known(c.reveal_t, tk)).length));
+  setText($("stEvents"), String(data.passed.filter((e) => known(e.reveal_t, tk)).length));
   setText($("clock"), wallClock(t));
-  setText($("time"), `${fmt(t)} / ${fmt(data.clip.duration || video.duration, false)}`);
+  setText($("time"), `${fmt(t)} / ${fmt(data.clip.duration || video.duration, false)}${data.live ? ` · поток ${fmt(data.live.processed, false)}` : ""}`);
+  if (data.live && !video.paused && t >= data.live.processed - LIVE_LAG) {
+    video.pause();
+    liveHeld = true;
+  }
+  $("liveWait").classList.toggle("hidden", !liveHeld);
   if (opt.pause && !video.paused && t > prevT && t - prevT < 1) {
     if (data.passed.some((e) => prevT < e.reveal_t && e.reveal_t <= t)) video.pause();
   }
@@ -781,7 +845,8 @@ function loop() {
 
 function seek(t) {
   if (!data) return;
-  const end = Math.min(video.duration || Infinity, data.clip.duration || Infinity);
+  let end = Math.min(video.duration || Infinity, data.clip.duration || Infinity);
+  if (data.live) end = Math.min(end, data.live.processed);
   video.currentTime = clamp(t, 0, Number.isFinite(end) ? Math.max(0, end - 0.05) : 0);
   mediaT = video.currentTime;
   feedKey = "";
@@ -795,6 +860,7 @@ function setFocus(id, keep = false) {
 
 function togglePlay() {
   if (!data) return;
+  liveHeld = false;
   if (video.paused) video.play();
   else video.pause();
 }
@@ -809,7 +875,7 @@ function jumpEvent(dir) {
 
 function showWait(c) {
   const w = $("wait");
-  if (c && c.state === "ready" && data) {
+  if (c && data) {
     w.classList.add("hidden");
     return;
   }
@@ -821,6 +887,9 @@ function showWait(c) {
     else if (c.state === "tracking") {
       pct = Math.round(c.progress * 100);
       msg = `${c.id}: трекинг людей и поз… ${pct}%`;
+    } else if (c.state === "streaming") {
+      pct = Math.round(c.progress * 100);
+      msg = `${c.id}: обработка потоком… ${pct}%`;
     } else if (c.state === "analyzing") {
       pct = 100;
       msg = `${c.id}: анализ циклов, проверка предметов, события…`;
@@ -836,10 +905,58 @@ function showWait(c) {
 function clipLabel(c) {
   if (c.state === "ready") return `${c.id} · ${c.events ? `${c.events} ${plural(c.events, EPISODES)}` : "без эпизодов"}`;
   if (c.state === "tracking") return `${c.id} · трекинг ${Math.round(c.progress * 100)}%`;
+  if (c.state === "streaming") {
+    const ev = c.events ? ` · ${c.events} ${plural(c.events, EPISODES)}` : "";
+    return `${c.id} · поток ${Math.round(c.progress * 100)}%${ev}`;
+  }
   return `${c.id} · ${STATE[c.state] || c.state}`;
 }
 
+function applyData(d) {
+  data = d;
+  const cl = d.clip;
+  const vlm = d.vlm && d.vlm.enabled ? ` · VLM ${d.vlm.model}` : "";
+  $("clipMeta").textContent = `${cl.camera_id} · ${cl.video_name} · ${cl.width}×${cl.height} · ${fmt(cl.duration, false)}` +
+    ` · людей ${d.stats.tracks} · циклов ${d.stats.cycles}${vlm}`;
+  $("winSec").textContent = String(d.thresholds.window);
+  updateClipStats();
+  $("condCycles").querySelector("b").textContent = `≥ ${d.thresholds.min_cycles} ${plural(d.thresholds.min_cycles)} за ${d.thresholds.window} с`;
+  const direct = ["сигарета, вейп, дым"];
+  if (d.thresholds.flash_as_direct) direct.push("вспышка зажигалки");
+  if (d.thresholds.vapor_as_direct) direct.push("выдох");
+  $("condDirect").querySelector("small").textContent = direct.join(", ");
+  feedKey = "";
+  dirty = true;
+}
+
+function scheduleLive() {
+  clearTimeout(liveTimer);
+  if (data && data.live) liveTimer = setTimeout(refreshLive, LIVE_POLL);
+}
+
+async function refreshLive() {
+  const id = clipId;
+  try {
+    const r = await fetch(`/api/clips/${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (r.ok) {
+      const d = prepare(await r.json());
+      if (clipId !== id || !data) return;
+      applyData(d);
+      if (liveHeld && (!d.live || video.currentTime < d.live.processed - LIVE_LAG - 1)) {
+        liveHeld = false;
+        video.play();
+      }
+    }
+  } catch (e) {
+
+  }
+  if (clipId === id) scheduleLive();
+}
+
 async function loadClip(id) {
+  clearTimeout(liveTimer);
+  liveHeld = false;
+  $("liveWait").classList.add("hidden");
   clipId = id;
   data = null;
   focusId = null;
@@ -857,30 +974,22 @@ async function loadClip(id) {
   const c = clips.find((x) => x.id === id);
   showWait(c);
   if (c && c.state === "idle") fetch(`/api/clips/${encodeURIComponent(id)}`, { cache: "no-store" }).catch(() => {});
-  if (!c || c.state !== "ready") return;
+  if (!c || !c.data) return;
   loading = true;
   try {
     const r = await fetch(`/api/clips/${encodeURIComponent(id)}`, { cache: "no-store" });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = prepare(await r.json());
     if (clipId !== id) return;
-    data = d;
+    applyData(d);
     const cl = d.clip;
-    $("clipMeta").textContent = `${cl.camera_id} · ${cl.video_name} · ${cl.width}×${cl.height} · ${fmt(cl.duration, false)}` +
-      ` · людей ${d.stats.tracks} · циклов ${d.stats.cycles}`;
-    $("winSec").textContent = String(d.thresholds.window);
-    updateClipStats();
-    $("condCycles").querySelector("b").textContent = `≥ ${d.thresholds.min_cycles} ${plural(d.thresholds.min_cycles)} за ${d.thresholds.window} с`;
-    const direct = ["сигарета, вейп, дым"];
-    if (d.thresholds.flash_as_direct) direct.push("вспышка зажигалки");
-    if (d.thresholds.vapor_as_direct) direct.push("выдох");
-    $("condDirect").querySelector("small").textContent = direct.join(", ");
     video.src = cl.video_url;
     video.playbackRate = Number($("speed").value);
     const start = Number((location.hash.match(/[#&]t=([\d.]+)/) || [])[1]);
     if (start > 0) video.addEventListener("loadedmetadata", () => seek(start), { once: true });
     prevT = 0;
     showWait(c);
+    scheduleLive();
   } catch (e) {
     setText($("wait").querySelector(".msg"), `${id}: не удалось загрузить данные (${e.message})`);
   } finally {
@@ -902,14 +1011,14 @@ async function pollClips() {
       if (clipId !== null) sel.value = clipId;
     }
     const cur = clips.find((c) => c.id === clipId);
-    if (clipId === null || (!userChose && !data && !loading && cur && cur.state !== "ready")) {
+    if (clipId === null || (!userChose && !data && !loading && cur && !cur.data)) {
 
       const want = decodeURIComponent((location.hash.match(/[#&]clip=([^&]+)/) || [])[1] || "");
-      const pick = clips.find((c) => c.id === want) || clips.find((c) => c.state === "ready") || clips[0];
+      const pick = clips.find((c) => c.id === want) || clips.find((c) => c.state === "ready") || clips.find((c) => c.data) || clips[0];
       if (want && pick && pick.id === want) userChose = true;
-      if (pick && (pick.id !== clipId || pick.state === "ready")) loadClip(pick.id);
+      if (pick && (pick.id !== clipId || pick.data)) loadClip(pick.id);
       else showWait(cur);
-    } else if (cur && cur.state === "ready" && !data && !loading) {
+    } else if (cur && cur.data && !data && !loading) {
       loadClip(clipId);
     } else if (!data) {
       showWait(cur);
@@ -920,6 +1029,73 @@ async function pollClips() {
   const busy = !clips.length || clips.some((c) => c.state !== "ready" && c.state !== "error");
   setTimeout(pollClips, busy ? 1000 : 5000);
 }
+
+function upload(file) {
+  if (!file) return;
+  const btn = $("uploadBtn");
+  const label = btn.querySelector("span");
+  if (btn.classList.contains("busy")) return;
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/upload");
+  xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) label.textContent = `загрузка ${Math.round((e.loaded / e.total) * 100)}%`;
+  };
+  const done = () => {
+    btn.classList.remove("busy");
+    label.textContent = UPLOAD_TEXT;
+  };
+  xhr.onload = () => {
+    done();
+    let r = {};
+    try {
+      r = JSON.parse(xhr.responseText);
+    } catch (e) {
+
+    }
+    if (xhr.status !== 201) {
+      alert(`Не удалось загрузить ${file.name}: ${r.error || `HTTP ${xhr.status}`}`);
+      return;
+    }
+    if (!clips.some((c) => c.id === r.id)) clips.push(r);
+    userChose = true;
+    loadClip(r.id);
+  };
+  xhr.onerror = () => {
+    done();
+    alert(`Не удалось загрузить ${file.name}: нет связи с сервером`);
+  };
+  btn.classList.add("busy");
+  label.textContent = "загрузка 0%";
+  xhr.send(file);
+}
+
+const hasFiles = (e) => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+
+$("uploadFile").addEventListener("change", (e) => {
+  upload(e.target.files[0]);
+  e.target.value = "";
+});
+document.addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  dropDepth += 1;
+  $("drop").classList.remove("hidden");
+});
+document.addEventListener("dragleave", (e) => {
+  if (!hasFiles(e)) return;
+  dropDepth = Math.max(0, dropDepth - 1);
+  if (!dropDepth) $("drop").classList.add("hidden");
+});
+document.addEventListener("dragover", (e) => {
+  if (hasFiles(e)) e.preventDefault();
+});
+document.addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dropDepth = 0;
+  $("drop").classList.add("hidden");
+  upload(e.dataTransfer.files[0]);
+});
 
 $("clip").addEventListener("change", (e) => {
   userChose = true;

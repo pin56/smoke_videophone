@@ -23,13 +23,15 @@ RT_COLUMNS = [
     "decoded_frames", "sparse_frames", "dense_frames", "people", "crops_sparse", "crops_dense", "triggers",
     "jobs", "jobs_reopened", "max_parallel", "dropped_triggers", "scored_cycles", "cycles", "valid_cycles", "events",
     "alerts", "alerts_withdrawn", "alert_latency_sec", "skipped_cycles", "alert_holds",
+    "vlm_asks", "vlm_rejects", "vlm_sec", "vlm_vetoed",
 ]  # fmt: skip
 
 
 def clip_outputs(run: RtRun, jobs: Optional[List[PersonJob]], cfg: Config, clip: ClipInput, out_dir: Path, device: str,
                  scorer=None, from_cache: bool = False, render: bool = False):  # fmt: skip
     """События клипа по итогу стадий 1–3 (jobs — задания из потока, None — повтор из кэша) → строки
-    predictions/processing_log/realtime_log; debug пишется сразу; render — ролик rendered/<clip>.mp4."""
+    predictions/processing_log/realtime_log; debug пишется сразу; render — ролик rendered/<clip>.mp4 (с ответами
+    VLM-арбитра — состояние арбитра у рамок и на панели, как они приходили в потоке)."""
     t0 = time.perf_counter()
     roi = Roi.load(clip.roi_path, run.meta.width, run.meta.height)
     cycles, signals, events = analyze(run, cfg, roi, jobs, scorer, clip.clip_id, clip.video_path)
@@ -37,11 +39,17 @@ def clip_outputs(run: RtRun, jobs: Optional[List[PersonJob]], cfg: Config, clip:
     render_sec = 0.0
     if render:
         from .render import render_video
+        from .vlm import overlay
 
         meta = dataclasses.replace(run.meta, path=clip.video_path)
         hold = int(meta.fps / max(cfg.realtime.sparse_fps, 0.1)) + 1  # рамка держится до следующего отсчёта 1 Гц
+        kw = {}
+        if any("vlm" in a for a in run.alerts):
+            name = cfg.vlm.model.rstrip("/").split("/")[-1].replace("-Instruct", "")
+            kw["marks"], kw["panel"] = overlay(run.alerts, events, name)
+            kw["tail"] = min(30.0, max(0.0, max(a["t"] for a in run.alerts) + 2.0 - meta.duration))  # ответы после конца
         path = render_video(meta, 1, out_dir / "rendered" / f"{clip.clip_id}.mp4", signals, cycles, events, roi,
-                            f"{clip.camera_id}/{clip.clip_id}", clip.start_time, hold=hold, others=run.sparse)  # fmt: skip
+                            f"{clip.camera_id}/{clip.clip_id}", clip.start_time, hold=hold, others=run.sparse, **kw)  # fmt: skip
         render_sec = time.perf_counter() - t0 - analysis_sec
         logging.info("[%s] ролик с разметкой: %s", clip.clip_id, path)
     records = event_records(events, clip.camera_id, clip.clip_id)
@@ -68,7 +76,7 @@ def clip_outputs(run: RtRun, jobs: Optional[List[PersonJob]], cfg: Config, clip:
         "decode_wait_sec": round(tm.get("decode_wait", 0.0), 2), "pose_sec": round(tm.get("pose_sparse", 0.0) + tm.get("pose_dense", 0.0), 2),
         "appearance_sec": round(tm.get("objects", 0.0), 2), "signals_sec": round(tm.get("cycles", 0.0), 2),
     }  # fmt: skip
-    lat = [a["latency"] for a in run.alerts if not a.get("withdrawn")]
+    lat = [a["latency"] for a in run.alerts if "latency" in a]  # без снятий и ответов VLM
     rt_row = {
         "camera_id": clip.camera_id, "clip_id": clip.clip_id, "duration_sec": round(dur, 2), "wall_sec": round(wall, 2),
         "load": round(wall / dur, 3) if dur else "", "cpu_sec": st.get("cpu_sec", ""),
@@ -79,9 +87,12 @@ def clip_outputs(run: RtRun, jobs: Optional[List[PersonJob]], cfg: Config, clip:
                                       "crops_dense", "triggers", "jobs", "jobs_reopened", "max_parallel",
                                       "dropped_triggers", "scored_cycles")},
         "cycles": n_cycles, "valid_cycles": n_valid, "events": len(records), "alerts": len(lat),
-        "alerts_withdrawn": len(run.alerts) - len(lat),
+        "alerts_withdrawn": sum(1 for a in run.alerts if a.get("withdrawn")),
         "alert_latency_sec": round(sum(lat) / len(lat), 2) if lat else "",
         "skipped_cycles": st.get("skipped_cycles", 0), "alert_holds": st.get("alert_holds", 0),
+        "vlm_asks": st.get("vlm_asks", 0), "vlm_rejects": st.get("vlm_rejects", 0),
+        "vlm_sec": round(st["vlm_sec"] / st["vlm_asks"], 3) if st.get("vlm_asks") else "",
+        "vlm_vetoed": sum(1 for e in events if e.reject_reason.startswith("vlm:")),
     }  # fmt: skip
     logging.info("[%s] %.1f с видео за %.1f с (загрузка %.2f), заданий %d, циклов %d (валидных %d), событий %d",
                  clip.clip_id, dur, wall, wall / dur if dur else 0, st.get("jobs", 0), n_cycles, n_valid, len(records))  # fmt: skip

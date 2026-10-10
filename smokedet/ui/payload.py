@@ -3,10 +3,15 @@
 У циклов, событий и строк ленты есть reveal_t — момент видео, к которому анализ о них «знает»: цикл — после
 отвода руки, событие — когда по закончившимся циклам выполнено правило эпизода. В режиме повтора интерфейс
 показывает только открытое к текущему времени, поэтому повтор выглядит как живой анализ.
+
+Потоковый режим (rt_payload): событие открывается тревогой потока и ответом VLM-арбитра — как их получил бы оператор.
+Пока клип обрабатывается, данные пересобираются по состоянию сессии (live.processed — до какого момента дошёл поток).
 """
 from __future__ import annotations
 
 import math
+from collections import defaultdict
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Sequence
 
 import cv2
@@ -15,7 +20,7 @@ import numpy as np
 from ..config import Config, EpisodeConfig
 from ..cycles import Cycle
 from ..episodes import Event, has_evidence
-from ..geometry import TrackSignal
+from ..geometry import TrackSignal, build_signal
 from ..io_video import VideoMeta
 from ..roi import Roi
 from ..tracking import PersonObs
@@ -80,6 +85,8 @@ def reason_text(reason: str) -> str:
             parts.append(f"в руке {object_name(r.split(':', 1)[1])}")
         elif r.startswith("object:"):
             parts.append(f"у рта {object_name(r.split(':', 1)[1])}")
+        elif r.startswith("vlm:"):
+            parts.append(f"VLM-арбитр: не курение (P={float(r[4:]):.2f})")
         elif r.startswith("objects_in_") and r.endswith("_cycles"):
             parts.append(f"«чужие» предметы в {r[len('objects_in_'):-len('_cycles')]} циклов")
         else:
@@ -294,9 +301,10 @@ def build_payload(
     }
 
 
-def build_feed(cycles: List[dict], events: List[dict], flashes: List[dict], threshold: float) -> List[dict]:
-    """Лента анализа: строки с моментом появления t, человеком и текстом."""
-    feed = []
+def build_feed(cycles: List[dict], events: List[dict], flashes: List[dict], threshold: float,
+               extra: Sequence[dict] = ()) -> List[dict]:  # fmt: skip
+    """Лента анализа: строки с моментом появления t, человеком и текстом (extra — тревоги и ответы VLM потока)."""
+    feed = list(extra)
     for c in cycles:
         hold = (c["hold_end"] or 0.0) - (c["hold_start"] or 0.0)
         if c["valid"]:
@@ -316,14 +324,105 @@ def build_feed(cycles: List[dict], events: List[dict], flashes: List[dict], thre
                      "ref": None})
     for e in events:
         row = {"track_id": e["track_id"], "ref": e["id"]}
+        if e["reveal_t"] is None:  # поток ждёт ответа VLM: в ленте пока тревога и запрос
+            continue
         if e["passed"]:
             feed.append({**row, "t": e["reveal_t"], "kind": "event", "text": f"ЭПИЗОД: {e['reveal_basis']}"})
             length = (e["end"] or 0.0) - (e["start"] or 0.0)
             text = f"эпизод завершён: {length:.0f} с, {e['basis']}; уверенность {e['confidence']:.2f}"
-            feed.append({**row, "t": e["end"], "kind": "event_end", "text": text})
+            feed.append({**row, "t": max(e["end"] or 0.0, e["reveal_t"]), "kind": "event_end", "text": text})
         else:
             why = e["reason_text"] or f"уверенность {e['confidence']:.2f} < {threshold:.2f}"
             feed.append({**row, "t": e["reveal_t"], "kind": "event_reject", "text": f"кандидат ({e['basis']}) отклонён: {why}"})
-    order = {"reject": 0, "flash": 1, "cycle": 2, "event_reject": 3, "event": 4, "event_end": 5}
+    order = {"reject": 0, "flash": 1, "cycle": 2, "alert": 3, "vlm_send": 4, "vlm": 5, "vlm_reject": 5, "event_reject": 6,
+             "event": 7, "event_end": 8, "withdrawn": 8}  # fmt: skip
     feed.sort(key=lambda r: (r["t"] if r["t"] is not None else 0.0, order[r["kind"]]))
     return feed
+
+
+def vlm_text(r: dict, hi: float) -> str:
+    """Ответ VLM-арбитра (запись журнала тревог) одной строкой."""
+    if r["vlm"] is None:
+        why = f"CLIP {r['clip_best']:.1f} ≥ {hi:g}" if r.get("skip") == "clip" else "нет кропов"
+        return f"VLM не спрашивали ({why}) → уведомление"
+    verdict = "курит" if r["answer"] else "не курит"
+    if r["notify"]:
+        tail = "уведомление" if r["answer"] else f"уведомление по CLIP {r['clip_best']:.1f}"
+    else:
+        tail = "отказ, событие снято"
+    return f"VLM: {verdict}, P={r['vlm']:.2f} → {tail}"
+
+
+def alert_feed(alerts: Sequence[dict], vlm_on: bool, hi: float) -> List[dict]:
+    """Строки ленты из журнала тревог потока: тревога, запрос к VLM (send), ответ (answer), снятие тревоги."""
+    rows = []
+    for r in alerts:
+        row = {"t": r["t"], "track_id": r["track_id"], "ref": None}
+        if r.get("withdrawn"):
+            why = reason_text(r.get("reason", "").split(":")[0])
+            rows.append({**row, "kind": "withdrawn", "text": "тревога снята" + (f": {why}" if why else "")})
+        elif "latency" in r:
+            text = f"ТРЕВОГА: правило эпизода выполнено (задержка {r['latency']:.1f} с)"
+            rows.append({**row, "kind": "alert", "text": text + (" → вопрос VLM" if vlm_on else "")})
+        elif "vlm" in r:
+            if r["vlm"] is not None:
+                what = "перепроверка" if r.get("kind") == "recheck" else "запрос"
+                rows.append({**row, "t": r["send"], "kind": "vlm_send", "text": f"VLM: {what}, кропов {r['crops']}"})
+            wait = r["work"] - r["send"]
+            took = f" · ответ за {r['sec']:.1f} с" + (f", очередь {wait:.1f} с" if wait > 0.05 else "") if r["vlm"] is not None else ""
+            rows.append({**row, "kind": "vlm" if r["notify"] else "vlm_reject", "text": vlm_text(r, hi) + took})
+    return rows
+
+
+def rt_payload(clip, meta: VideoMeta, job_recs: Sequence[dict], sparse: Dict[int, List[PersonObs]], cycles, events,
+               alerts: Sequence[dict], cfg: Config, video_url: str, processed: Optional[float] = None) -> dict:  # fmt: skip
+    """Данные интерфейса по потоковому режиму (realtime.py). Люди — отсчёты 1 Гц и плотной проверки вместе
+    (job_recs — PersonJob.record()), событие открывается тревогой потока и ответом VLM-арбитра из alerts.
+    processed — до какого момента дошёл поток (None — клип обработан)."""
+    roi = Roi.load(clip.roi_path, meta.width, meta.height)
+    by_tid: Dict[int, Dict[int, PersonObs]] = defaultdict(dict)
+    for tid, os_ in sparse.items():
+        for o in os_:
+            by_tid[tid][o.frame_idx] = o
+    for rec in job_recs:
+        for o in rec["obs"]:
+            by_tid[rec["tid"]][o.frame_idx] = o
+    tracks, shown = {}, {}
+    for tid, d in by_tid.items():
+        obs = [d[k] for k in sorted(d)]
+        if len(obs) >= 3:
+            tracks[tid] = obs
+            shown[tid] = build_signal(tid, obs, roi, cfg.geometry, cfg.tracking, cfg.realtime.dense_fps)
+    analysis = SimpleNamespace(signals=shown, cycles=cycles, events=events, flashes={})
+    data = build_payload(clip, meta, tracks, analysis, cfg, video_url)
+    gap = 0.5 / max(cfg.realtime.sparse_fps, 0.1) + 0.1  # вне плотной проверки человек виден раз в секунду
+    for tr in data["tracks"]:
+        tr["gap"] = round(gap, 2)
+
+    vc, ep = cfg.vlm, cfg.episode
+    for e, ev in zip(events, data["events"]):
+        mine = [r for r in alerts if r["track_id"] == e.track_id and r["start"] <= e.end + 0.05 and r["end"] >= e.start - 0.05]
+        raised = [r["t"] for r in mine if "latency" in r]
+        answers = sorted((r for r in mine if "vlm" in r), key=lambda r: r["t"])
+        ev["alert_t"] = _num(min(raised)) if raised else None
+        ev["vlm_text"] = vlm_text(answers[-1], vc.hi) if answers else ""
+        reveal = ev["reveal_t"]
+        if e.passed:
+            ok = [r["t"] for r in answers if r["notify"]]
+            if ok:
+                reveal = ok[0]
+            elif raised and vc.enabled and processed is not None:
+                reveal = None  # тревога поднята, VLM ещё не ответил
+            elif raised:
+                reveal = min(raised)
+        elif e.reject_reason.startswith("vlm:") and answers:
+            reveal = answers[-1]["t"]
+        ev["reveal_t"] = None if reveal is None else _num(reveal)
+        upto = reveal if reveal is not None else processed if processed is not None else math.inf
+        ev["reveal_basis"] = basis_text([c for c in e.cycles if c.end <= upto], cfg.verifier.positive_classes)
+    rows = alert_feed(alerts, vc.enabled, vc.hi)
+    data["feed"] = build_feed(data["cycles"], data["events"], data["flashes"], ep.confidence_threshold, rows)
+    data["live"] = None if processed is None else {"processed": _num(processed, 2)}
+    data["vlm"] = {"enabled": vc.enabled, "model": vc.model.rstrip("/").split("/")[-1], "thr": vc.thr, "hi": vc.hi}
+    data["stats"]["alerts"] = sum(1 for r in alerts if "latency" in r)
+    return data

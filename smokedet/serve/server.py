@@ -154,7 +154,7 @@ class Camera:
         srv.hub.warm_shape(meta.height, meta.width)
         roi = Roi.load(clip.roi_path or self.spec.roi, meta.width, meta.height)
         self._apply_level()
-        ses = RealtimeSession(srv.hub.session_models(), self.cfg, meta, roi, srv.hub.encoder())
+        ses = RealtimeSession(srv.hub.session_models(), self.cfg, meta, roi, srv.hub.encoder(), srv.vlm)
         ses.stream_fps = base_dense  # сетка потока — базовая частота, ступень меняет частоту заданий
         self.src = src
         self.state = "online" if real else "filler"
@@ -254,6 +254,8 @@ class Server:
         self.gpu = models.device != "cpu"
         self.ctrl = Controller(base.serve, self.ladder.size, boost=bool(self.ladder.boost))
         self.hub = Hub(models, base, self.gpu)
+        # VLM-арбитр (vlm.enabled): одна модель и очередь на все камеры
+        self.vlm = models.arbiter(base) if base.vlm.enabled else None
         self.cams = [Camera(self, s) for s in specs]
         for c in self.cams:
             c.target = 0 if fixed_level is None else fixed_level
