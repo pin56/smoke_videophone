@@ -2,13 +2,13 @@
 """Мониторинг камер: стена потоков с архивом, проверка загруженных видео, журнал эпизодов, хранение фрагментов.
 
 Сервер слушает только 127.0.0.1: видео не покидает машину. Камеры — симуляция (видео объекта публиковать
-нельзя), загруженные файлы анализирует пайплайн (`--analyzer pipeline`, нужны модели), потоковый режим
-(`--analyzer realtime`, как run_rt.py) или демо-анализ (`--analyzer demo`: эпизоды генерируются и помечены в журнале
+нельзя), загруженные файлы анализирует потоковый режим с VLM-арбитром (`--analyzer realtime`, как run_rt.py, по умолчанию),
+офлайн-пайплайн (`--analyzer pipeline`) или демо-анализ (`--analyzer demo`: эпизоды генерируются и помечены в журнале
 как демо). `--enqueue` ставит в очередь проверки имеющиеся записи: файлы, папки с видео, CSV со списком клипов.
 Примеры:
     python monitor.py
     python monitor.py --analyzer demo --retention-days 7 --port 8765
-    python monitor.py --analyzer realtime --enqueue videos/true videos/false
+    python monitor.py --enqueue videos/true videos/false
 """
 from __future__ import annotations
 
@@ -36,9 +36,10 @@ from smokedet.monitor.server import MonitorServer  # noqa: E402
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Мониторинг камер и проверка видео")
     p.add_argument("--out", default="runs/monitor", help="журнал, загруженные файлы и фрагменты")
-    p.add_argument("--analyzer", choices=["pipeline", "realtime", "demo"], default="pipeline",
-                   help="pipeline — настоящий анализ (нужны модели), realtime — потоковый режим (run_rt.py), "
+    p.add_argument("--analyzer", choices=["pipeline", "realtime", "demo"], default="realtime",
+                   help="realtime — потоковый режим (run_rt.py), pipeline — офлайн-пайплайн (run.py), "
                         "demo — сгенерированные эпизоды для показа")
+    p.add_argument("--vlm", action=argparse.BooleanOptionalAction, default=True, help="VLM-арбитр тревог (по умолчанию включён, vlm.enabled): отказ модели снимает событие; --no-vlm — без него")
     p.add_argument("--enqueue", nargs="+", default=[], metavar="PATH",
                    help="поставить в очередь проверки имеющиеся записи: видеофайлы, папки с видео, CSV со списком клипов")
     p.add_argument("--retention-days", type=float, default=7.0, help="срок хранения фрагментов и загрузок")
@@ -62,7 +63,7 @@ def main(argv=None) -> int:
         sys.exit(f"--enqueue: {e}")
     analyzers = {"pipeline": PipelineAnalyzer, "realtime": RealtimeAnalyzer}
     analyzer = (DemoAnalyzer() if args.analyzer == "demo"
-                else analyzers[args.analyzer](args.config, args.set, out))  # fmt: skip
+                else analyzers[args.analyzer](args.config, args.set + (["vlm.enabled=true"] if args.vlm else []), out))  # fmt: skip
     problem = analyzer.available()
     if problem:
         logging.warning("проверка видео: %s (задания завершатся ошибкой; для показа — --analyzer demo)", problem)

@@ -7,7 +7,7 @@
 верификатора и COCO-модель для отката, затем сохраняет open-vocab модель с заданным словарём
 (weights/<модель>-vocab-<хэш>.pt). С таким файлом прогон не загружает текстовый энкодер CLIP. Для CPU сохраняет
 в OpenVINO детектор и позу потокового режима (weights/<модель>_openvino_model) и визуальную часть CLIP внешнего
-вида (при appearance.openvino).
+вида (при appearance.openvino). VLM-арбитр (vlm.model) — в кэш Hugging Face.
 """
 from __future__ import annotations
 
@@ -63,6 +63,10 @@ def main(argv=None) -> int:
     print(f"CLIP внешнего вида {cfg.appearance.model}: {file_sha256(enc.weights)}")
     if cfg.appearance.openvino:
         print(f"CLIP для CPU (OpenVINO): {export_openvino(enc.model, enc.weights, enc.res, enc.px)}")
+
+    from huggingface_hub import snapshot_download
+
+    print(f"VLM-арбитр потока (--vlm) {cfg.vlm.model}: {snapshot_download(cfg.vlm.model)}")  # кэш Hugging Face, ~4 ГБ
     return 0
 
 

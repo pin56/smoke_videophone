@@ -44,6 +44,7 @@ from .io_video import FrameClock, VideoMeta, _open, prefetched, probe_video
 from .ov_yolo import OvYolo, is_openvino_dir
 from .roi import Roi, anchor_point
 from .tracking import PersonObs, box_iou, half_kwargs, select_device
+from .vlm import SessionArbiter, apply_veto
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ POSE_BATCH = 24  # кропов в одном вызове позы (все ра
 SETTLE_EXTRA = 1.0  # с сверх cycle.lookaround: после конца цикла столько ждать, прежде чем его зафиксировать
 CROP_SIDE = 1.2  # стадия 4: в памяти хранится квадрат со стороной CROP_SIDE роста вокруг «рот + кисть»...
 CROP_MAX = 576  # ...не больше CROP_MAX px (широкий кроп CLIP 0.7 роста — до 336 px, как вход модели)
+LIVE_PREFIXES = ("rtsp://", "rtmp://", "http://", "https://")  # живой источник: поток не ждёт VLM-арбитра
 CROP_KEEP_EXTRA = 3.0  # с сверх паузы и фаз подхода/отвода: столько хранятся кропы отсчётов
 MOTION_SAMPLES = 12  # скорость рамки — по стольким последним отсчётам задания (в пределах realtime.motion_window)...
 MOTION_MIN_SPAN = 0.3  # ...охватывающим не меньше стольких с
@@ -663,6 +665,8 @@ def inference_hash(cfg: Config) -> str:
     rc = {k: v for k, v in rc.items() if not (k in HASH_DEFAULTS and v == HASH_DEFAULTS[k])}
     data = {"realtime": rc, "geometry": cfg.to_dict()["geometry"], "tracking": cfg.to_dict()["tracking"],
             "video": cfg.to_dict()["video"]}  # fmt: skip
+    if cfg.vlm.enabled:  # ответы VLM-арбитра — в журнале тревог прогона (кэш без них их не даст)
+        data["vlm"] = cfg.to_dict()["vlm"]
     return hashlib.sha256(repr(sorted(data.items())).encode()).hexdigest()[:16]
 
 
@@ -743,7 +747,7 @@ def limit_threads(n: int, precision: str = "") -> None:
 class RealtimeSession:
     """Состояние обработки одного клипа (потока)."""
 
-    def __init__(self, models: "RealtimeDetector", cfg: Config, meta: VideoMeta, roi: Roi, encoder=None):
+    def __init__(self, models: "RealtimeDetector", cfg: Config, meta: VideoMeta, roi: Roi, encoder=None, arbiter=None):
         self.m, self.cfg, self.rc, self.meta, self.roi = models, cfg, cfg.realtime, meta, roi
         self.encoder = encoder  # стадия 4 (None — выключена)
         self.tracker = SparseTracker(self.rc.track_iou, self.rc.track_dist, self.rc.track_max_missed)
@@ -758,6 +762,8 @@ class RealtimeSession:
         self.t0: Optional[float] = None  # время первого кадра потока
         self.stream_fps = self.rc.dense_fps  # частота плотной сетки потока (сервер меняет rc.dense_fps на лету)
         self._alerted: Dict[int, AlertState] = {}  # человек -> последнее событие, о котором сообщено (alert_change)
+        # VLM-арбитр (smokedet/vlm.py): тревога уходит модели, ответ приходит в журнал тревог по времени потока
+        self.vlm = SessionArbiter(arbiter, cfg.vlm, self.alerts, self.stats) if arbiter is not None else None
 
     # -- вспомогательное
     def _pose(self, items, key: str):
@@ -790,6 +796,8 @@ class RealtimeSession:
         elif self.active:
             self._dense_step(f)
         self.ring.push(f)
+        if self.vlm is not None:
+            self.vlm.poll(f.t)
 
     def _dense_step(self, f: StreamFrame) -> None:
         jobs = [j for j in self.active.values() if j.wants(f.t)]
@@ -946,6 +954,8 @@ class RealtimeSession:
         st = self._alerted.get(tid)
         if not (self.rc.skip_confirmed and c.valid and st is not None and st[2]):
             return False
+        if self.vlm is not None and self.vlm.rejected(tid):
+            return False  # модель отказала: новый цикл нужен с оценкой для перепроверки
         if c.start - st[1] > self.cfg.episode.merge_gap + EPS:
             return False  # новое событие
         scores = [x.appearance for j in self.jobs if j.tid == tid for x in j.cycles
@@ -967,6 +977,8 @@ class RealtimeSession:
             apply_score(c, s, ac, keep_cycle(self.cfg))
         self.tm["objects"] += time.perf_counter() - t0
         self.stats["scored_cycles"] += len(todo)
+        if self.vlm is not None:
+            self.vlm.add(job.tid, job.crops, sig, todo, job.last_t)
 
     def _alert(self, tid: int, now: float, sig: TrackSignal) -> None:
         """Сообщение о курении, как только у человека выполнилось правило эпизода (как в итоговом build_events);
@@ -978,6 +990,8 @@ class RealtimeSession:
         if st is not None:
             self._alerted[tid] = st
         if msg is None:
+            if self.vlm is not None and st is not None and st[2]:
+                self.vlm.on_extend(tid, st, now)
             return
         if msg == "withdrawn":
             self._withdraw(tid, now, st, events[-1].reject_reason)
@@ -985,6 +999,8 @@ class RealtimeSession:
         rec = {"t": round(now, 2), "track_id": tid, "start": round(st[0], 2), "end": round(st[1], 2)}
         self.alerts.append({**rec, "latency": round(now - st[1], 2)})
         log.info("t=%.1f с: похоже на курение, человек %d (%.1f–%.1f с)", now, tid, st[0], st[1])
+        if self.vlm is not None:
+            self.vlm.on_alert(tid, st, now)
 
     def _withdraw(self, tid: int, now: float, st: AlertState, reason: str) -> None:
         self._alerted[tid] = (st[0], st[1], False)
@@ -994,6 +1010,8 @@ class RealtimeSession:
 
     def finish(self, t: float) -> None:
         self._finalize(t, final=True)
+        if self.vlm is not None:
+            self.vlm.poll(t, final=True)
 
 
 class RealtimeDetector:
@@ -1005,6 +1023,7 @@ class RealtimeDetector:
         self.device = select_device(cfg.detector.device)
         self._detect: Optional[PersonDetector] = None
         self._pose: Optional[CropPose] = None
+        self._vlm = None
         self.appearance = AppearanceScorer(self.device, project_path(cfg.appearance.weights_dir))
 
     def _load(self) -> None:
@@ -1027,19 +1046,36 @@ class RealtimeDetector:
         self._load()
         return self._pose
 
+    def arbiter(self, cfg: Config):
+        """VLM-арбитр (vlm.enabled): модель грузится один раз за процесс."""
+        if not cfg.vlm.enabled:
+            return None
+        if self._vlm is None:
+            from .vlm import VlmArbiter
+
+            self._vlm = VlmArbiter(cfg.vlm, self.device)
+        return self._vlm
+
     def encoder(self, cfg: Config):
         if not cfg.realtime.objects:
             return None
         return self.appearance._encoder(cfg.appearance)
 
     def run(self, video_path: str, cfg: Config, roi_path: Optional[str] = None,
-            on_frame: Optional[Callable[[StreamFrame], None]] = None) -> Tuple[RtRun, List[PersonJob]]:  # fmt: skip
-        """Стадии 1–3 (и 4 при realtime.objects) по клипу: отсчёты, задания с зафиксированными циклами."""
+            on_frame: Optional[Callable[[StreamFrame], None]] = None,
+            on_start: Optional[Callable[["RealtimeSession"], None]] = None) -> Tuple[RtRun, List[PersonJob]]:  # fmt: skip
+        """Стадии 1–3 (и 4 при realtime.objects) по клипу: отсчёты, задания с зафиксированными циклами.
+        on_start получает сессию до первого кадра, on_frame вызывается после каждого шага — между ними состояние
+        сессии (задания, тревоги, ответы VLM) можно читать: так интерфейс показывает анализ по ходу потока."""
         rc = cfg.realtime
         meta = probe_video(video_path, cfg.video.fallback_fps)
         roi = Roi.load(roi_path, meta.width, meta.height)
         enc = self.encoder(cfg)
-        ses = RealtimeSession(self, cfg, meta, roi, enc)
+        ses = RealtimeSession(self, cfg, meta, roi, enc, self.arbiter(cfg))
+        if ses.vlm is not None:
+            ses.vlm.sync = not str(video_path).lower().startswith(LIVE_PREFIXES)
+        if on_start is not None:
+            on_start(ses)
         stream_stats: dict = {}
         # форма входа детектора зависит от разрешения: первый вызов на новой форме долгий — до начала отсчёта
         self.detect(np.zeros((max(meta.height, 32), max(meta.width, 32), 3), dtype=np.uint8))
@@ -1058,6 +1094,9 @@ class RealtimeDetector:
                 on_frame(f)
         ses.finish(last_t)
         wall, cpu = time.perf_counter() - start, time.process_time() - cpu0
+        if ses.vlm is not None:  # ожидание ответов модели при повторе с файла — не нагрузка потока
+            ses.tm["vlm_wait"] = ses.vlm.wait
+            wall -= ses.vlm.wait
         return session_result(ses, meta, stream_stats, wall, cpu), ses.jobs
 
 
@@ -1089,4 +1128,5 @@ def analyze(run: RtRun, cfg: Config, roi: Roi, jobs: Optional[List[PersonJob]] =
         scorer.score(clip_id, video_path, cycles, signals, cfg.appearance, keep_cycle(cfg),
                      run.meta.synthetic_from)  # fmt: skip
     events = rt_events(cycles, signals, cfg)
+    apply_veto(events, run.alerts)  # отказы VLM-арбитра из журнала тревог потока
     return cycles, signals, events

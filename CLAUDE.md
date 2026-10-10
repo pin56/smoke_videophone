@@ -24,13 +24,15 @@
 .venv/bin/python run.py --input videos/1.mp4 --camera-id cam1 --out runs/x --render   # один клип
 .venv/bin/python run.py --inputs data/hidden.csv --out runs/final [--workers 2]   # набор (CSV: video_path,camera_id[,clip_id,start_time,roi])
 .venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/rt/final [--no-objects]   # потоковый режим
+.venv/bin/python run_rt.py --inputs runs/gpu_students/students.csv --out runs/x --config configs/serve_gpu.yaml --render   # поток с VLM-арбитром (по умолчанию; --no-vlm — без), ролики с его состоянием
 .venv/bin/python run_rt.py --inputs runs/rt/all.csv --out runs/cpu --device cpu --set realtime.det_model=weights/yolo11n_openvino_model --set realtime.pose_model=weights/yolo11m-pose_openvino_model   # на CPU через OpenVINO (профиль CLIP 168 px — README, «На CPU»)
 .venv/bin/python tools/clip_lab.py score --inputs runs/rt/all.csv --cache runs/cpu/cache --emb runs/clip_lab/L168.pkl --grid lab.views=0+1+2 --grid lab.agg=top2 --grid appearance.min_score=0,1   # пороги CLIP по банку эмбеддингов (банк — clip_lab.py extract)
 .venv/bin/python tools/tune_rt.py --inputs runs/rt/all.csv --cache runs/rt/final/cache --grid appearance.min_score=0,0.5
-.venv/bin/python ui.py --inputs data/demo.csv --out runs/final        # веб-интерфейс повтора на 127.0.0.1:8765
-.venv/bin/python ui.py --videos videos --out runs/ui                  # то же по папке, анализ при открытии клипа
+.venv/bin/python ui.py --inputs data/demo.csv --out runs/final        # веб-интерфейс на 127.0.0.1:8765: поток + VLM, данные по ходу
+.venv/bin/python ui.py --videos videos --out runs/ui                  # то же по папке; видео можно загрузить из браузера
+.venv/bin/python ui.py --inputs data/demo.csv --out runs/x --analyzer pipeline --no-vlm   # офлайн-пайплайн run.py
 .venv/bin/python monitor.py --analyzer demo --out runs/monitor        # мониторинг: стена камер, архив, журнал
-.venv/bin/python monitor.py --analyzer realtime --enqueue videos/true videos/false
+.venv/bin/python monitor.py --enqueue videos/true videos/false      # потоковый режим + VLM (по умолчанию)
 .venv/bin/python evaluate.py --pred runs/x/predictions.csv --gt gt.csv --durations runs/x/processing_log.csv --out runs/x/report
 .venv/bin/python tune.py --inputs ref.csv --gt ref_gt.csv --out runs/tune --grid episode.confidence_threshold=0.3,0.5 [--cv auto|clip|camera|none]
 .venv/bin/python tools/eval_markup.py --run runs/x [--run runs/y]   # оценка по rasmetka_gt.csv (только время, без IoU)
@@ -61,8 +63,11 @@
    `valid=False` и `reject_reason`; `appearance` может вернуть цикл (`rescued_from`). `export.event_records` берёт только
    события с `passed`.
 
-Веб-интерфейс (`ui.py`, `smokedet/ui/`) — поверх готового `Analysis`; `reveal_t` у циклов/событий — момент, к которому
-анализ о них «знает», фронтенд в повторе показывает только открытое. Время анализа — pts, как `currentTime` браузера.
+Веб-интерфейс (`ui.py`, `smokedet/ui/`) по умолчанию работает потоком с VLM (`ui/stream.py::StreamWorker`, payload —
+`payload.rt_payload`, публикуется по ходу, `live.processed` — докуда дошёл поток); `--analyzer pipeline` — поверх
+`Analysis` офлайн-пайплайна. Загрузка — `POST /api/upload` (тело — файл, имя в `X-Filename`) в `<out>/uploads/`. `reveal_t` у циклов/событий — момент, к которому
+анализ о них «знает», фронтенд в повторе показывает только открытое. Событие потока открывается ответом VLM;
+`reveal_t=None` — тревога поднята, ответа ещё нет (фронтенд — состояние `check`). Время анализа — pts, как `currentTime` браузера.
 Видео отдаётся с HTTP Range (без него не работает перемотка). Причины отказа и классы верификатора переводятся в
 `payload.CYCLE_REASONS`/`OBJECT_NAMES` — новую причину или класс добавляйте туда.
 
@@ -83,7 +88,12 @@ NMS в numpy, без `predict()` ultralytics); CLIP внешнего вида н
 OpenVINO на CPU с BF16 (Zen 4/5, Xeon) считает в bf16 — события чуть отличаются от torch. Бюджет ядер — `--cpus` и
 `realtime.threads` (в `RULE_FIELDS`), `cpu_cores` в логе — процессорное время / длительность.
 `appearance.input_px` — вход ViT OpenAI CLIP меньше родного (`appearance.resize_vit`), IR на каждый px свой;
-`appearance.model=oc:<арх>/<тег>` — модели open_clip. `ClipEncoder` грузится один раз за процесс: `model`/`input_px`
+`appearance.model=oc:<арх>/<тег>` — модели open_clip. VLM-арбитр (`smokedet/vlm.py`) работает внутри
+потока: тревога → запрос в отдельном потоке → ответ в `alerts` по времени потока (отправка + очередь + время модели),
+отказ снимает событие (`apply_veto`). С файла поток ждёт ответ (`SessionArbiter.sync`, ожидание вычитается из `load`), с живого источника время ответа —
+не раньше фактического. Включён флагом `--vlm/--no-vlm` (по умолчанию да) в `run_rt.py`/`ui.py`/`monitor.py`/`serve.py`;
+`vlm.enabled` в `default.yaml` — `false`, чтобы не сбрасывать кэш `tune_rt.py`/`clip_lab.py`.
+Секция `vlm` входит в ключ кэша только при `vlm.enabled`: прогон с VLM — в новую папку. Пустой `vlm.device` — устройство детектора, GPU < 10 ГиБ → CPU (`vlm.pick_device`). `ClipEncoder` грузится один раз за процесс: `model`/`input_px`
 в одной сетке `tune_rt.py`/`clip_lab.py` не перебирать — отдельные запуски. `clip_lab score` требует те же `--set`
 `realtime.*`, что прогон кэша (ключ кэша), ключи `lab.*` — только через `--grid`.
 

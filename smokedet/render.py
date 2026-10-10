@@ -5,9 +5,10 @@ import logging
 import shutil
 import subprocess
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -18,11 +19,24 @@ from .flash import Flash
 from .geometry import TrackSignal
 from .io_video import FrameClock, VideoMeta
 from .roi import Roi
+from .tracking import PersonObs
 
 log = logging.getLogger(__name__)
 
 RED, YELLOW, GREEN, GRAY, WHITE = (0, 0, 255), (0, 220, 255), (80, 200, 80), (150, 150, 150), (255, 255, 255)
 ORANGE = (0, 140, 255)
+
+
+@dataclass
+class Mark:
+    """Состояние человека, известное потоку с t0 по t1: рамка цвета color и подпись text ({dt} — секунд с t0).
+    Заменяет отметку события из events: показ «как в потоке», без знания будущего."""
+
+    t0: float
+    t1: float
+    text: str
+    color: tuple
+    alarm: bool = False  # тревога: толстая рамка и ALARM в шапке
 
 
 def _label(frame, text, org, color, scale, thick):
@@ -66,11 +80,26 @@ def render_video(
     title: str,
     start_time: Optional[str] = None,
     flashes: Optional[Dict[int, List[Flash]]] = None,
+    hold: int = 0,
+    others: Optional[Dict[int, List[PersonObs]]] = None,
+    marks: Optional[Dict[int, List[Mark]]] = None,
+    panel: Optional[Callable[[float], List[Tuple[str, tuple]]]] = None,
+    tail: float = 0.0,
 ) -> Path:
+    """hold > 0 (потоковый режим: отсчёты не на каждом stride-м кадре) — последняя рамка человека держится hold кадров;
+    others — отсчёты людей вне плотной проверки (только рамка). marks — состояние людей по времени вместо отметки
+    событий из events, panel(t) — строки панели внизу слева. tail — секунд стоп-кадра после конца видео (ответы,
+    пришедшие после конца клипа: поток ждёт их, как живая камера)."""
     by_frame: Dict[int, list] = defaultdict(list)
     for tid, sig in signals.items():
         for i, f in enumerate(sig.frame_idx):
             by_frame[int(f)].append((tid, i))
+    other_by_frame: Dict[int, list] = defaultdict(list)
+    for tid, obs in (others or {}).items():
+        for o in obs:
+            other_by_frame[o.frame_idx].append((tid, o.box))
+    last: Dict[int, tuple] = {}  # tid -> (индекс отсчёта, кадр), при hold
+    last_other: Dict[int, tuple] = {}
     holds = {tid: [(c.hold_start, c.hold_end) for c in cs if c.valid] for tid, cs in cycles.items()}
     lit = {tid: [(f.start, f.end) for f in fs] for tid, fs in (flashes or {}).items()}
     puffs = {tid: [(c.vapor_t, c.vapor_t + 1.0) for c in cs if c.vapor] for tid, cs in cycles.items()}
@@ -87,14 +116,35 @@ def render_video(
     current: list = []
     clock = FrameClock(meta.fps)
     idx = 0
+    raw, t, t_end = None, 0.0, None
     while True:
         ok, frame = cap.read()
-        if not ok:
-            break
-        if idx % stride == 0:
-            current = by_frame.get(idx, [])
-        t = clock.time(idx, cap.get(cv2.CAP_PROP_POS_MSEC))  # то же время, что у наблюдений трекера
+        if ok:
+            t = clock.time(idx, cap.get(cv2.CAP_PROP_POS_MSEC))  # то же время, что у наблюдений трекера
+            raw = frame.copy() if tail > 0 else None
+        else:
+            if raw is None:
+                break
+            t_end = t if t_end is None else t_end
+            t += 1.0 / meta.fps
+            if t > t_end + tail:
+                break
+            frame = raw.copy()  # стоп-кадр: рамки людей застывают на последнем отсчёте
         roi.draw(frame, thickness=thick)
+        if hold and t_end is None:
+            for tid, i in by_frame.get(idx, []):
+                last[tid] = (i, idx)
+            for tid, box in other_by_frame.get(idx, []):
+                last_other[tid] = (box, idx)
+            current = [(tid, i) for tid, (i, f) in last.items() if idx - f <= hold]
+            seen = {tid for tid, _ in current}
+            for tid, (box, f) in last_other.items():
+                if idx - f <= hold and tid not in seen:
+                    x1, y1, x2, y2 = box.astype(int)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), GREEN, thick)
+                    _label(frame, f"id{tid}", (x1, y1 - 2), GREEN, fscale * 0.8, thick)
+        elif t_end is None and idx % stride == 0:
+            current = by_frame.get(idx, [])
         alarms = 0
         for tid, i in current:
             sig = signals[tid]
@@ -102,7 +152,15 @@ def render_video(
             event = next((e for e in shown if e.track_id == tid and e.start <= t <= e.end), None)
             in_hold = any(a <= t <= b for a, b in holds.get(tid, []))
             phase = _phase(all_cycles.get(tid, []), t)
-            if event is not None:
+            active = [m for m in (marks or {}).get(tid, []) if m.t0 <= t <= m.t1]
+            mark = max(reversed(active), key=lambda m: m.t0, default=None)  # при равном t0 — более поздняя запись
+            if marks is not None:
+                event = None
+            if mark is not None:
+                alarms += mark.alarm
+                cv2.rectangle(frame, (x1, y1), (x2, y2), mark.color, (2 if mark.alarm else 1) * thick)
+                _label(frame, f"{mark.text.format(dt=t - mark.t0)} id{tid}", (x1, y1 - 2), mark.color, fscale, thick)
+            elif event is not None:
                 alarms += 1
                 cv2.rectangle(frame, (x1, y1), (x2, y2), RED, 2 * thick)
                 _label(frame, f"SMOKING-LIKE {event.confidence:.2f} id{tid}", (x1, y1 - 2), RED, fscale, thick)
@@ -144,10 +202,18 @@ def render_video(
         n_cyc = sum(1 for cs in cycles.values() for c in cs if c.valid and c.end <= t)
         n_rej = sum(1 for cs in cycles.values() for c in cs if not c.valid and c.end <= t)
         n_ev = sum(1 for e in shown if e.end <= t or e.start <= t)
+        if marks is not None:
+            n_ev = sum(1 for ms in marks.values() for m in ms if m.alarm and m.t0 <= t)
+        if panel is not None:
+            lines = panel(t)
+            y = meta.height - 8 - int(36 * fscale * 0.8) * (len(lines) - 1)
+            for text, color in lines:
+                _label(frame, text, (8, y), color, fscale * 0.8, thick)
+                y += int(36 * fscale * 0.8)
         _label(frame, f"people {len(current)}  cycles {n_cyc}  rejected {n_rej}  events {n_ev}", (8, 8 + int(40 * fscale)),
                GREEN, fscale * 0.8, thick)
         stamp = (t0 + timedelta(seconds=t)).strftime("%Y-%m-%d %H:%M:%S") if t0 else f"t={t:8.2f}s"
-        banner = f"{title}  {stamp}" + (f"  ALARM x{alarms}" if alarms else "")
+        banner = f"{title}  {stamp}" + ("  END OF CLIP" if t_end is not None else "") + (f"  ALARM x{alarms}" if alarms else "")
         _label(frame, banner, (8, 8), RED if alarms else WHITE, fscale, thick)
         writer.write(frame)
         idx += 1

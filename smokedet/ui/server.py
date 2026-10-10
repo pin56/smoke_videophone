@@ -2,7 +2,8 @@
 
 Видео объекта нельзя отправлять наружу, поэтому сервер не открывается в сеть, а статика не тянет ничего с CDN.
 Маршруты: `/` и `/static/*` — страница, `/api/clips` — список клипов и их состояние, `/api/clips/<id>` — данные
-анализа (payload.py), `/video/<id>` — видео с поддержкой HTTP Range (без неё браузер не перематывает).
+анализа (payload.py; в потоковом режиме — и по ходу обработки), `/video/<id>` — видео с поддержкой HTTP Range (без неё
+браузер не перематывает), POST `/api/upload` — загрузка видео (тело — файл, имя — заголовок X-Filename).
 """
 from __future__ import annotations
 
@@ -41,6 +42,8 @@ CONTENT_TYPES = {
 BROWSER_CODECS = {"avc1", "h264", "x264"}
 BROWSER_CONTAINERS = {".mp4", ".m4v", ".mov"}
 CHUNK = 1 << 16
+UPLOAD_EXT = {".mp4", ".m4v", ".mov", ".avi", ".mkv", ".webm", ".ts"}
+MAX_UPLOAD = 8 << 30
 
 
 @dataclass
@@ -52,6 +55,8 @@ class ClipJob:
     payload: Optional[bytes] = None
     video: Optional[Path] = None
     events: int = 0
+    processed: float = 0.0  # с видео, до которых дошёл поток
+    duration: float = 0.0
 
     def summary(self) -> dict:
         return {
@@ -62,6 +67,9 @@ class ClipJob:
             "progress": round(self.progress, 3),
             "error": self.error,
             "events": self.events,
+            "processed": round(self.processed, 1),
+            "data": self.payload is not None,  # данные уже можно показать (в потоковом режиме — по ходу обработки)
+            "duration": round(self.duration, 1),
         }
 
 
@@ -101,7 +109,9 @@ def browser_video(src: Path, proxy_dir: Path, clip_id: str) -> Path:
 
 
 class ClipStore:
-    """Очередь клипов: трекинг (с кэшем) → анализ → данные для интерфейса. Работает в одном фоновом потоке."""
+    """Очередь клипов → данные для интерфейса. Работает в одном фоновом потоке. Обработчик из pipeline_factory —
+    потоковый режим (stream.StreamWorker, есть process_job: данные публикуются по ходу потока) или офлайн-пайплайн
+    (Pipeline: трекинг с кэшем → анализ, process)."""
 
     def __init__(self, clips: Iterable, out_dir: Path, pipeline_factory: Callable, use_cache: bool = True,
                  lazy: bool = False):
@@ -112,15 +122,37 @@ class ClipStore:
         self._factory = pipeline_factory
         self.jobs: Dict[str, ClipJob] = {c.clip_id: ClipJob(c) for c in clips}
         self._wake = threading.Condition()
+        self._worker = None
         if lazy:
             for job in self.jobs.values():
 
                 job.state = "queued" if self._cached(job) else "idle"
+        else:  # сначала клипы из кэша: они готовы сразу
+            self.jobs = dict(sorted(self.jobs.items(), key=lambda kv: not self._cached(kv[1])))
 
     def start(self) -> threading.Thread:
-        thread = threading.Thread(target=self.run_lazy if self.lazy else self.run, name="ui-clips", daemon=True)
+        thread = threading.Thread(target=self.run_queue, name="ui-clips", daemon=True)
         thread.start()
         return thread
+
+    def add(self, clip) -> ClipJob:
+        """Новый клип (загрузка из интерфейса) — в конец очереди."""
+        with self._wake:
+            job = self.jobs[clip.clip_id] = ClipJob(clip)
+            self._wake.notify()
+        return job
+
+    def upload_path(self, name: str) -> Tuple[str, Path]:
+        """clip_id и файл для загрузки name: имя файла без расширения, при совпадении — с номером."""
+        stem = re.sub(r"[^\w.-]+", "_", Path(name).stem).strip("._")[:60] or "upload"
+        folder = self.out_dir / "uploads"
+        folder.mkdir(parents=True, exist_ok=True)
+        cid, k = stem, 1
+        with self._wake:
+            while cid in self.jobs or any(folder.glob(f"{cid}.*")):
+                k += 1
+                cid = f"{stem}-{k}"
+        return cid, folder / f"{cid}{Path(name).suffix.lower()}"
 
     def request(self, clip_id: str) -> None:
         """Клип открыли в интерфейсе: поставить в очередь (в lazy-режиме), если ещё не обрабатывался."""
@@ -130,36 +162,38 @@ class ClipStore:
                 job.state = "queued"
                 self._wake.notify()
 
-    def run_lazy(self) -> None:
-        pipeline = None
+    def run_queue(self) -> None:
+        """Клипы в состоянии queued по очереди; ждёт новых (открытых в lazy-режиме и загруженных)."""
         while True:
             with self._wake:
                 job = next((j for j in self.jobs.values() if j.state == "queued"), None)
                 while job is None:
                     self._wake.wait()
                     job = next((j for j in self.jobs.values() if j.state == "queued"), None)
-            try:
-                if pipeline is None:
-                    pipeline = self._factory()
-                self.process(pipeline, job)
-            except Exception as e:
-                log.exception("[%s] не удалось подготовить клип", job.clip.clip_id)
-                job.state, job.error = "error", f"{type(e).__name__}: {e}"
+            self._handle(job)
+
+    def _handle(self, job: ClipJob) -> None:
+        try:
+            if self._worker is None:
+                self._worker = self._factory()
+            stream = getattr(self._worker, "process_job", None)
+            if stream is not None:
+                stream(self, job)
+            else:
+                self.process(self._worker, job)
+        except Exception as e:
+            log.exception("[%s] не удалось подготовить клип", job.clip.clip_id)
+            job.state, job.error = "error", f"{type(e).__name__}: {e}"
 
     def _cached(self, job: ClipJob) -> bool:
-        return self.use_cache and (self.out_dir / "cache" / f"{job.clip.clip_id}_tracks.pkl").exists()
+        cache = self.out_dir / "cache"
+        cid = job.clip.clip_id
+        return self.use_cache and ((cache / f"{cid}_tracks.pkl").exists() or (cache / f"{cid}_rt.pkl").exists())
 
     def run(self) -> None:
-        pipeline = None
-
-        for job in sorted(self.jobs.values(), key=lambda j: not self._cached(j)):
-            try:
-                if pipeline is None:
-                    pipeline = self._factory()
-                self.process(pipeline, job)
-            except Exception as e:
-                log.exception("[%s] не удалось подготовить клип", job.clip.clip_id)
-                job.state, job.error = "error", f"{type(e).__name__}: {e}"
+        """Все клипы один раз (без ожидания новых)."""
+        for job in list(self.jobs.values()):
+            self._handle(job)
 
     def process(self, pipeline, job: ClipJob) -> None:
         from ..tracking import stitch_tracks
@@ -225,6 +259,45 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self._route(head=True)
 
+    def do_POST(self) -> None:
+        size = int(self.headers.get("Content-Length") or 0)
+        if unquote(urlparse(self.path).path) != "/api/upload":
+            self._drain(size)
+            return self._error(HTTPStatus.NOT_FOUND, False)
+        store = self.server.store
+        name = Path(unquote(self.headers.get("X-Filename") or "")).name
+        if Path(name).suffix.lower() not in UPLOAD_EXT:
+            self._drain(size)
+            return self._json({"error": f"нужен видеофайл: {', '.join(sorted(UPLOAD_EXT))}"}, False,
+                              HTTPStatus.UNSUPPORTED_MEDIA_TYPE)  # fmt: skip
+        if size <= 0 or size > MAX_UPLOAD:
+            self._drain(size)
+            return self._json({"error": "файл пустой или больше 8 ГБ"}, False, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        cid, target = store.upload_path(name)
+        left = size
+        with open(target, "wb") as f:
+            while left > 0:
+                chunk = self.rfile.read(min(CHUNK * 16, left))
+                if not chunk:
+                    break
+                f.write(chunk)
+                left -= len(chunk)
+        if left:
+            target.unlink(missing_ok=True)
+            return self._json({"error": "загрузка прервана"}, False, HTTPStatus.BAD_REQUEST)
+        from ..pipeline import ClipInput
+
+        job = store.add(ClipInput(video_path=str(target), camera_id="upload", clip_id=cid))
+        log.info("[%s] загружен %s (%.1f МБ)", cid, name, size / 2**20)
+        self._json(job.summary(), False, HTTPStatus.CREATED)
+
+    def _drain(self, n: int) -> None:
+        while n > 0:
+            chunk = self.rfile.read(min(CHUNK * 16, n))
+            if not chunk:
+                break
+            n -= len(chunk)
+
     def _route(self, head: bool) -> None:
         path = unquote(urlparse(self.path).path)
         jobs = self.server.store.jobs
@@ -238,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._error(HTTPStatus.NOT_FOUND, head)
             elif path == "/api/clips":
-                self._json([j.summary() for j in jobs.values()], head)
+                self._json([j.summary() for j in list(jobs.values())], head)
             elif path.startswith("/api/clips/"):
                 job = jobs.get(path[len("/api/clips/"):])
                 if job is None:

@@ -265,6 +265,23 @@ class RealtimeConfig:
 
 
 @dataclass
+class VlmConfig:
+    """VLM-арбитр тревог потокового режима (smokedet/vlm.py): тревога уходит модели вместе с кропами лучших по CLIP
+    циклов события, отказ модели снимает событие. Модель считает в своём потоке, поток видео её не ждёт."""
+
+    enabled: bool = False
+    model: str = "Qwen/Qwen3-VL-2B-Instruct"  # Hugging Face (кэш HF_HOME) или локальная папка
+    device: str = ""  # пусто — как detector.device
+    top: int = 3  # кропов на запрос: лучшие по CLIP циклы события
+    scale: float = 0.7  # сторона кропа, доли роста человека: голова и кисти
+    px: int = 448  # сторона кропа на входе модели
+    orders: int = 2  # 2 — варианты ответа ещё и в обратном порядке (снимает предпочтение буквы)
+    thr: float = 0.1  # P(курит) + P(вейп) ниже — отказ
+    hi: float = 9.0  # лучший CLIP события не ниже — уведомление при любом ответе модели
+    max_asks: int = 3  # запросов на событие: после отказа событие перепроверяется, когда в нём появился новый цикл
+
+
+@dataclass
 class ServeConfig:
     """Сервер на много камер (serve.py, smokedet/serve): регулятор нагрузки и общие модели."""
 
@@ -323,6 +340,7 @@ SECTIONS = {
     "appearance": AppearanceConfig,
     "episode": EpisodeConfig,
     "realtime": RealtimeConfig,
+    "vlm": VlmConfig,
     "serve": ServeConfig,
     "report": ReportConfig,
 }
@@ -341,6 +359,7 @@ class Config:
     appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     realtime: RealtimeConfig = field(default_factory=RealtimeConfig)
+    vlm: VlmConfig = field(default_factory=VlmConfig)
     serve: ServeConfig = field(default_factory=ServeConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
 

@@ -2,6 +2,7 @@
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import numpy as np
@@ -190,3 +191,60 @@ def test_scan_videos(tmp_path):
     (tmp_path / "notes.txt").write_text("x")
     clips = ui_mod.scan_videos(tmp_path)
     assert [c.clip_id for c in clips] == ["2", "true__1"]
+
+
+def _rt(alerts, processed=None):
+    from smokedet.ui.payload import rt_payload
+    from smokedet.vlm import apply_veto
+
+    cfg, analysis, tracks = _analysis([2, 8])
+    cfg.vlm.enabled = True
+    apply_veto(analysis.events, alerts)
+    clip = ClipInput("x/clip.mp4", "cam1", "c1")
+    meta = VideoMeta("x/clip.mp4", 30.0, 1200, 640, 480)
+    p = rt_payload(clip, meta, [], tracks, analysis.cycles, analysis.events, alerts, cfg, "/video/c1", processed)
+    json.dumps(p, allow_nan=False)
+    return p, p["events"][0], [r["kind"] for r in p["feed"]]
+
+
+def _alerts(answer=None):
+    out = [{"t": 14.0, "track_id": 1, "start": 2.0, "end": 13.0, "latency": 1.0}]
+    if answer is not None:
+        out.append({"t": 16.5, "track_id": 1, "start": 2.0, "end": 13.0, "vlm": 0.9 if answer else 0.03, "answer": answer,
+                    "notify": answer, "send": 14.0, "work": 14.2, "sec": 2.3, "crops": 2, "kind": "alert", "clip_best": 4.0})
+    return out
+
+
+def test_rt_payload_event_waits_for_vlm():
+    p, ev, kinds = _rt(_alerts(), processed=15.0)
+    assert p["live"] == {"processed": 15.0} and p["tracks"][0]["gap"] > 0.45
+    assert ev["passed"] and ev["alert_t"] == 14.0 and ev["reveal_t"] is None  # тревога есть, ответа VLM нет
+    assert "alert" in kinds and "event" not in kinds and "event_end" not in kinds
+
+    p, ev, kinds = _rt(_alerts(True))
+    assert p["live"] is None and ev["passed"] and ev["reveal_t"] == 16.5 and ev["vlm_text"].startswith("VLM: курит")
+    assert kinds.index("alert") < kinds.index("vlm_send") < kinds.index("vlm") < kinds.index("event")
+    assert [r["t"] for r in p["feed"]] == sorted(r["t"] for r in p["feed"])
+
+    p, ev, kinds = _rt(_alerts(False))
+    assert not ev["passed"] and ev["reveal_t"] == 16.5 and "VLM-арбитр" in ev["reason_text"]
+    assert "vlm_reject" in kinds and "event_reject" in kinds and p["stats"]["events"] == 0
+
+
+def _post(url, body, name):
+    req = urllib.request.Request(url, data=body, method="POST", headers={"X-Filename": urllib.parse.quote(name)})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_upload_queues_clip(base_url, tmp_path):
+    status, s = _post(base_url + "/api/upload", b"video-bytes", "мой клип.mp4")
+    assert status == 201 and s["id"] == "мой_клип" and s["state"] == "queued" and s["camera_id"] == "upload"
+    assert (tmp_path / "uploads" / "мой_клип.mp4").read_bytes() == b"video-bytes"
+    assert _post(base_url + "/api/upload", b"x", "мой клип.mp4")[1]["id"] == "мой_клип-2"
+    assert _post(base_url + "/api/upload", b"x", "notes.txt")[0] == 415
+    ids = [c["id"] for c in json.loads(_get(base_url + "/api/clips")[2])]
+    assert ids == ["c1", "c2", "мой_клип", "мой_клип-2"]
